@@ -22,6 +22,7 @@ import serial
 import serial.tools.list_ports
 
 HEADER = bytes([0xAB, 0xCD, 0xEF])
+WAVEFORM_HEADER = bytes([0xAB, 0xCD, 0xAA])
 
 # Known USB-to-TTL UART bridges (VID, PID)
 KNOWN_UART_VID_PIDS = {
@@ -120,6 +121,7 @@ class SCODriver:
             "pw_pos_us": 0.0,
             "pw_neg_us": 0.0,
             "overflow": [],
+            "waveform": [],
             "timestamp": time.time(),
             "formatted_time": time.strftime("%H:%M:%S")
         }
@@ -339,6 +341,40 @@ class SCODriver:
         with self._serial_lock:
             return self._query_device_serial()
 
+    def _query_device_waveform(self, timeout: float = 0.2) -> Optional[List[int]]:
+        """
+        Sends Command 0x03 0x03 and reads raw ADC waveform samples (300 points).
+        Packet format: 0xAB 0xCD 0xAA (3 bytes) + Length (2 bytes) + 300 samples.
+        """
+        if not self.ser or not self.ser.is_open:
+            return None
+        try:
+            self.ser.reset_input_buffer()
+            self.ser.write(bytes([0x03, 0x03]))
+            deadline = time.time() + timeout
+            buf = bytearray()
+            
+            while time.time() < deadline:
+                in_wait = getattr(self.ser, 'in_waiting', 0) or 1
+                chunk = self.ser.read(in_wait)
+                if chunk:
+                    buf.extend(chunk)
+                    idx = buf.find(WAVEFORM_HEADER)
+                    if idx != -1 and len(buf) >= idx + 5:
+                        sample_count = (buf[idx+3] << 8) | buf[idx+4]
+                        if sample_count <= 0 or sample_count > 2000:
+                            return None
+                        if len(buf) >= idx + 5 + sample_count:
+                            return list(buf[idx+5:idx+5+sample_count])
+            return None
+        except Exception:
+            return None
+
+    def read_waveform_once(self) -> Optional[List[int]]:
+        """Public thread-safe fetch of raw ADC samples."""
+        with self._serial_lock:
+            return self._query_device_waveform()
+
     def _worker_loop(self):
         """Background acquisition loop."""
         consecutive_failures = 0
@@ -351,6 +387,10 @@ class SCODriver:
             # Query hardware under _serial_lock
             with self._serial_lock:
                 metrics = self._query_device_serial()
+                if metrics and self.baudrate == 115200:
+                    wf = self._query_device_waveform(timeout=0.15)
+                    if wf:
+                        metrics["waveform"] = wf
 
             if metrics:
                 consecutive_failures = 0
@@ -380,7 +420,7 @@ class SCODriver:
                     consecutive_failures = 0
                     time.sleep(0.5)
 
-            time.sleep(0.04 if self.baudrate == 115200 else 0.10)
+            time.sleep(0.02 if self.baudrate == 115200 else 0.10)
 
     def start(self):
         if self.running:

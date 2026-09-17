@@ -572,72 +572,101 @@
       }
       ctx.restore();
 
-      // WAVEFORM SYNTHESIS & RENDERING
+      // WAVEFORM RENDERING (RAW HARDWARE ADC SAMPLES OR RECONSTRUCTED FALLBACK)
       if (latestData) {
         const vmax = latestData.v_max || 0;
         const vmin = latestData.v_min || 0;
         const vpp  = latestData.v_pp || 0;
         const freq = latestData.frequency_hz || 0;
         const duty = (latestData.duty_pos_pct || 50) / 100.0;
+        const hasRawWf = latestData.waveform && latestData.waveform.length > 0;
 
-        // Permanent On-Screen Reconstructed Watermark (Issue 3 Fix)
+        // On-Screen Watermark / Mode Indicator
         ctx.save();
-        ctx.fillStyle = 'rgba(245, 158, 11, 0.85)';
-        ctx.font = 'bold 11px "JetBrains Mono", monospace';
-        ctx.fillText('⚠️ RECONSTRUCTED TRACE — NOT RAW ADC SAMPLES', 14, 22);
+        if (hasRawWf) {
+          ctx.fillStyle = 'rgba(16, 185, 129, 0.90)';
+          ctx.font = 'bold 11px "JetBrains Mono", monospace';
+          ctx.fillText(`🟢 LIVE HARDWARE TRACE — RAW ADC BUFFER (${latestData.waveform.length} PTS @ 115200 BAUD)`, 14, 22);
+        } else {
+          ctx.fillStyle = 'rgba(245, 158, 11, 0.85)';
+          ctx.font = 'bold 11px "JetBrains Mono", monospace';
+          ctx.fillText('⚠️ RECONSTRUCTED TRACE — NOT RAW ADC SAMPLES', 14, 22);
+        }
         ctx.restore();
 
-        animPhase += (freq > 0 ? 0.08 : 0.01);
+        if (hasRawWf) {
+          // RENDER REAL HARDWARE ADC WAVEFORM BUFFER
+          const wf = latestData.waveform;
+          const n = wf.length;
 
-        ctx.save();
-        // Calculate vertical scale mapping
-        // Baseline midY is 0V, each cell dy = 1V or adaptive
-        const voltSpan = Math.max(vmax - vmin, vpp, 1.0);
-        const scaleY = (dy * 2.5) / voltSpan;
+          ctx.strokeStyle = '#10b981';
+          ctx.shadowColor = '#00f5d4';
+          ctx.shadowBlur = 8;
+          ctx.lineWidth = 2.2;
+          ctx.beginPath();
 
-        const isAC = (freq > 50 && vpp > 0.08);
+          for (let i = 0; i < n; i++) {
+            const x = (i / (n - 1)) * w;
+            // The scope screen coordinate: 0 is bottom, ~200 is top
+            const normY = wf[i] / 200.0;
+            const canvasY = (h - 20) - (normY * (h - 40));
+            const clampedY = Math.max(10, Math.min(h - 10, canvasY));
 
-        // Draw DC Ripple Tolerance Band if DC rail with noticeable ripple
-        if (!isAC && vpp > 0.05) {
-          ctx.fillStyle = 'rgba(245, 158, 11, 0.10)';
-          const bandTop = midY - ((vave + vpp / 2) * (scaleY * 0.4));
-          const bandBottom = midY - ((vave - vpp / 2) * (scaleY * 0.4));
-          ctx.fillRect(0, Math.min(bandTop, bandBottom), w, Math.abs(bandBottom - bandTop));
-        }
+            if (i === 0) {
+              ctx.moveTo(x, clampedY);
+            } else {
+              ctx.lineTo(x, clampedY);
+            }
+          }
+          ctx.stroke();
+        } else {
+          // FALLBACK: SYNTHESIS FROM TELEMETRY
+          animPhase += (freq > 0 ? 0.08 : 0.01);
 
-        ctx.strokeStyle = '#10b981';
-        ctx.shadowColor = '#00f5d4';
-        ctx.shadowBlur = 8;
-        ctx.lineWidth = 2.2;
-        ctx.beginPath();
+          ctx.save();
+          const voltSpan = Math.max(vmax - vmin, vpp, 1.0);
+          const scaleY = (dy * 2.5) / voltSpan;
+          const isAC = (freq > 50 && vpp > 0.08);
 
-        for (let x = 0; x < w; x++) {
-          const t = (x / w) * Math.PI * 8 + animPhase;
-          let yVal = 0;
-
-          if (isAC) {
-            // Reconstruct periodic signal based on duty cycle
-            const cyclePos = (t % (2 * Math.PI)) / (2 * Math.PI);
-            let waveVal = (cyclePos < duty) ? 1.0 : -1.0;
-            // Add harmonic smoothing
-            waveVal = waveVal * 0.85 + Math.sin(t) * 0.15;
-            yVal = vave + waveVal * (vpp / 2);
-          } else {
-            // Deterministic measured ripple instead of deceptive Math.random() noise
-            const rippleSine = (vpp > 0.005) ? Math.sin(t * 2) * (vpp / 2) : 0;
-            yVal = vave + rippleSine;
+          if (!isAC && vpp > 0.05) {
+            ctx.fillStyle = 'rgba(245, 158, 11, 0.10)';
+            const bandTop = midY - ((vave + vpp / 2) * (scaleY * 0.4));
+            const bandBottom = midY - ((vave - vpp / 2) * (scaleY * 0.4));
+            ctx.fillRect(0, Math.min(bandTop, bandBottom), w, Math.abs(bandBottom - bandTop));
           }
 
-          const canvasY = midY - (yVal * (scaleY * 0.4));
-          const clampedY = Math.max(10, Math.min(h - 10, canvasY));
+          ctx.strokeStyle = '#10b981';
+          ctx.shadowColor = '#00f5d4';
+          ctx.shadowBlur = 8;
+          ctx.lineWidth = 2.2;
+          ctx.beginPath();
 
-          if (x === 0) {
-            ctx.moveTo(x, clampedY);
-          } else {
-            ctx.lineTo(x, clampedY);
+          for (let x = 0; x < w; x++) {
+            const t = (x / w) * Math.PI * 8 + animPhase;
+            let yVal = 0;
+
+            if (isAC) {
+              const cyclePos = (t % (2 * Math.PI)) / (2 * Math.PI);
+              let waveVal = (cyclePos < duty) ? 1.0 : -1.0;
+              waveVal = waveVal * 0.85 + Math.sin(t) * 0.15;
+              yVal = vave + waveVal * (vpp / 2);
+            } else {
+              const rippleSine = (vpp > 0.005) ? Math.sin(t * 2) * (vpp / 2) : 0;
+              yVal = vave + rippleSine;
+            }
+
+            const canvasY = midY - (yVal * (scaleY * 0.4));
+            const clampedY = Math.max(10, Math.min(h - 10, canvasY));
+
+            if (x === 0) {
+              ctx.moveTo(x, clampedY);
+            } else {
+              ctx.lineTo(x, clampedY);
+            }
           }
+          ctx.stroke();
+          ctx.restore();
         }
-        ctx.stroke();
 
         // Zero Baseline marker
         ctx.fillStyle = 'rgba(56, 189, 248, 0.6)';

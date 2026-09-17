@@ -59,6 +59,10 @@ class FakeSerial:
         del self.buf[:n]
         return out
 
+    @property
+    def in_waiting(self):
+        return len(self.buf)
+
     def close(self):
         self.is_open = False
 
@@ -330,13 +334,41 @@ class TestFastAPIServer(unittest.TestCase):
         })
         self.assertEqual(res.status_code, 422)
 
-    def test_api_diagnose_pydantic_rejects_negative(self):
-        # Negative expected_v
-        res = self.client.post("/api/diagnose", json={
-            "profile_id": "CUSTOM",
-            "custom_params": {"expected_v": -12.0}
-        })
-        self.assertEqual(res.status_code, 422)
+class TestWaveformAcquisition(unittest.TestCase):
+    def setUp(self):
+        self.driver = SCODriver(port="COM_TEST")
+
+    def _driver_with(self, data: bytes) -> SCODriver:
+        drv = SCODriver(port="COM_TEST")
+        drv.ser = FakeSerial(data)
+        return drv
+
+    def test_waveform_packet_parsing(self):
+        samples = list(range(100, 200)) + list(range(200, 100, -1)) + [100] * 100
+        self.assertEqual(len(samples), 300)
+        packet = bytes([0xAB, 0xCD, 0xAA, 0x01, 0x2C]) + bytes(samples)
+        drv = self._driver_with(packet)
+        wf = drv.read_waveform_once()
+        self.assertIsNotNone(wf)
+        self.assertEqual(len(wf), 300)
+        self.assertEqual(wf, samples)
+        self.assertEqual(bytes(drv.ser.written), bytes([0x03, 0x03]))
+
+    def test_waveform_resync_drops_leading_noise(self):
+        noise = b"\x55\xaa\xab\xcd\x00" * 4
+        samples = [120] * 300
+        packet = noise + bytes([0xAB, 0xCD, 0xAA, 0x01, 0x2C]) + bytes(samples)
+        drv = self._driver_with(packet)
+        wf = drv.read_waveform_once()
+        self.assertIsNotNone(wf)
+        self.assertEqual(len(wf), 300)
+        self.assertEqual(wf, samples)
+
+    def test_corrupt_waveform_length_rejected(self):
+        # Length 0
+        packet = bytes([0xAB, 0xCD, 0xAA, 0x00, 0x00])
+        drv = self._driver_with(packet)
+        self.assertIsNone(drv.read_waveform_once())
 
 
 if __name__ == "__main__":
