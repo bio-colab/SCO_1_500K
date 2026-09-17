@@ -1,0 +1,849 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SCO_1_500K Smart AI Oscilloscope Workstation</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;900&family=JetBrains+Mono:wght@400;600;800&display=swap" rel="stylesheet">
+  
+  <style>
+    body {
+      font-family: 'Cairo', sans-serif;
+      background-color: #0b0f17;
+      color: #e2e8f0;
+    }
+    .font-mono {
+      font-family: 'JetBrains Mono', monospace;
+    }
+    /* CRT Scanline & Phosphor Effects */
+    .scope-screen {
+      background: radial-gradient(circle at 50% 50%, #0a1f18 0%, #030a08 100%);
+      box-shadow: inset 0 0 25px rgba(16, 185, 129, 0.2), 0 10px 25px -5px rgba(0, 0, 0, 0.6);
+      position: relative;
+    }
+    .scope-screen::before {
+      content: " ";
+      position: absolute;
+      top: 0; left: 0; bottom: 0; right: 0;
+      background: linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.25) 50%);
+      background-size: 100% 4px;
+      z-index: 10;
+      pointer-events: none;
+      opacity: 0.35;
+    }
+    /* Pulse glow */
+    .pulse-green {
+      box-shadow: 0 0 12px #10b981;
+    }
+    .pulse-red {
+      box-shadow: 0 0 12px #ef4444;
+    }
+    /* Glass card effect */
+    .glass-card {
+      background: rgba(22, 27, 34, 0.85);
+      backdrop-filter: blur(12px);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+    }
+    /* Custom scrollbar */
+    ::-webkit-scrollbar {
+      width: 6px;
+      height: 6px;
+    }
+    ::-webkit-scrollbar-track {
+      background: #0d1117;
+    }
+    ::-webkit-scrollbar-thumb {
+      background: #233044;
+      border-radius: 4px;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+      background: #334155;
+    }
+  </style>
+</head>
+<body class="min-h-screen flex flex-col selection:bg-emerald-500 selection:text-black">
+
+  <!-- TOP NAVIGATION / STATUS BAR -->
+  <header class="glass-card sticky top-0 z-50 px-6 py-3 border-b border-slate-800 flex flex-wrap items-center justify-between gap-4">
+    <div class="flex items-center gap-4">
+      <div class="flex items-center gap-3">
+        <div class="w-10 h-10 rounded-xl bg-gradient-to-tr from-emerald-600 to-teal-400 flex items-center justify-center text-black font-black text-xl shadow-lg shadow-emerald-900/40">
+          ⚡
+        </div>
+        <div>
+          <h1 class="text-xl font-black tracking-wide text-white flex items-center gap-2">
+            SCO_1_500K <span class="text-xs bg-emerald-500/20 text-emerald-400 px-2 py-0.5 rounded border border-emerald-500/30">AI Lab Station</span>
+          </h1>
+          <p class="text-xs text-slate-400">منظومة راسم الإشارة الرقمي ومساعد التشخيص الذكي</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- CONNECTION & TELEMETRY STATUS -->
+    <div class="flex items-center gap-3 text-sm">
+      <div id="connBadge" class="flex items-center gap-2 px-3 py-1.5 rounded-full bg-slate-800 border border-slate-700 text-slate-300">
+        <span id="connDot" class="w-2.5 h-2.5 rounded-full bg-amber-400 animate-pulse"></span>
+        <span id="connText" class="font-mono text-xs">جاري الاتصال...</span>
+      </div>
+
+      <div class="hidden sm:flex items-center gap-2 px-3 py-1.5 rounded-lg bg-slate-900/80 border border-slate-800 font-mono text-xs text-slate-400">
+        <span class="text-slate-500">منفذ:</span>
+        <span id="portDisplay" class="text-emerald-400">COM3</span>
+        <span class="text-slate-600">|</span>
+        <span id="fpsDisplay" class="text-slate-300">0 FPS</span>
+      </div>
+
+      <!-- HARDWARE CONTROL BUTTONS -->
+      <button id="btnAuto" onclick="triggerAuto()" class="flex items-center gap-1.5 px-4 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 active:scale-95 text-black font-bold text-xs transition shadow-lg shadow-emerald-700/30">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+        <span>AUTO SET</span>
+      </button>
+
+      <button id="btnFreeze" onclick="toggleFreeze()" class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 font-medium text-xs transition">
+        <span id="freezeIcon">⏸️</span>
+        <span id="freezeText">تجميد (Hold)</span>
+      </button>
+
+      <button onclick="exportCSV()" class="p-2 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 hover:text-white transition text-xs" title="تصدير السجل كملف CSV">
+        💾
+      </button>
+    </div>
+  </header>
+
+  <!-- MAIN WORKSPACE -->
+  <main class="flex-1 p-4 lg:p-6 grid grid-cols-1 xl:grid-cols-12 gap-6 max-w-7xl mx-auto w-full">
+
+    <!-- LEFT / TOP SECTION: SCOPE SCREEN & METRICS (7 COLS) -->
+    <div class="xl:col-span-7 flex flex-col gap-6">
+
+      <!-- OSCILLOSCOPE CRT CANVAS -->
+      <div class="glass-card rounded-2xl p-4 flex flex-col gap-3 shadow-xl">
+        <div class="flex items-center justify-between text-xs font-mono text-slate-400 px-1">
+          <div class="flex items-center gap-3">
+            <span class="text-emerald-400 font-bold flex items-center gap-1">
+              <span class="w-2 h-2 rounded-full bg-emerald-400"></span> CH1 1X
+            </span>
+            <span class="text-slate-500">|</span>
+            <span id="scopeModeBadge" class="bg-emerald-950/80 text-emerald-400 px-2 py-0.5 rounded border border-emerald-800/40">AUTO</span>
+            <span id="scopeTimebase" class="text-slate-300">50 µs/DIV</span>
+          </div>
+          <div class="flex items-center gap-3">
+            <span id="scopeVoltDiv" class="text-amber-400">500 mV/DIV</span>
+            <span class="text-slate-500">|</span>
+            <span class="text-cyan-400">DC Coupling</span>
+          </div>
+        </div>
+
+        <!-- CANVAS WRAPPER -->
+        <div class="scope-screen rounded-xl overflow-hidden border border-emerald-900/50 aspect-[16/9] w-full flex items-center justify-center">
+          <canvas id="scopeCanvas" width="800" height="450" class="w-full h-full block"></canvas>
+        </div>
+
+        <!-- QUICK CANVAS TOOLBAR -->
+        <div class="flex items-center justify-between text-xs text-slate-400 pt-1 border-t border-slate-800/80 px-1">
+          <div class="flex items-center gap-2">
+            <span>مستوى الإطلاق (Trigger):</span>
+            <span class="font-mono text-emerald-400" id="trigLevel">0.00 V</span>
+          </div>
+          <div class="flex items-center gap-2">
+            <span class="text-slate-500">حالة الإشارة:</span>
+            <span id="signalStateText" class="text-slate-300 font-medium">مستقرة</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- LIVE DIGITAL GAUGES GRID -->
+      <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        <!-- V_MAX -->
+        <div class="glass-card rounded-xl p-3 border-r-4 border-r-emerald-500">
+          <div class="text-xs text-slate-400 mb-1">الجهد الأقصى (V_MAX)</div>
+          <div class="text-xl sm:text-2xl font-black font-mono text-emerald-400" id="valVmax">0.000 <span class="text-xs text-slate-500 font-sans">V</span></div>
+          <div class="text-[10px] text-slate-500 font-mono" id="valVmaxMv">0 mV</div>
+        </div>
+
+        <!-- V_MIN -->
+        <div class="glass-card rounded-xl p-3 border-r-4 border-r-blue-500">
+          <div class="text-xs text-slate-400 mb-1">الجهد الأدنى (V_MIN)</div>
+          <div class="text-xl sm:text-2xl font-black font-mono text-blue-400" id="valVmin">0.000 <span class="text-xs text-slate-500 font-sans">V</span></div>
+          <div class="text-[10px] text-slate-500 font-mono" id="valVminMv">0 mV</div>
+        </div>
+
+        <!-- V_PP / RIPPLE -->
+        <div class="glass-card rounded-xl p-3 border-r-4 border-r-amber-500">
+          <div class="text-xs text-slate-400 mb-1">التموج (V_PP / Ripple)</div>
+          <div class="text-xl sm:text-2xl font-black font-mono text-amber-400" id="valVpp">0.000 <span class="text-xs text-slate-500 font-sans">V</span></div>
+          <div class="text-[10px] text-amber-500/80 font-mono" id="valVppMv">0 mVpp</div>
+        </div>
+
+        <!-- V_RMS -->
+        <div class="glass-card rounded-xl p-3 border-r-4 border-r-purple-500">
+          <div class="text-xs text-slate-400 mb-1">الجهد الفعّال (V_RMS)</div>
+          <div class="text-xl sm:text-2xl font-black font-mono text-purple-400" id="valVrms">0.000 <span class="text-xs text-slate-500 font-sans">V</span></div>
+          <div class="text-[10px] text-slate-500 font-mono" id="valVave">المتوسط: 0.00V</div>
+        </div>
+
+        <!-- FREQUENCY -->
+        <div class="glass-card rounded-xl p-3 border-r-4 border-r-cyan-500">
+          <div class="text-xs text-slate-400 mb-1">التردد (Frequency)</div>
+          <div class="text-xl sm:text-2xl font-black font-mono text-cyan-400" id="valFreq">0.00 <span class="text-xs text-slate-500 font-sans">Hz</span></div>
+          <div class="text-[10px] text-slate-500 font-mono" id="valFreqKhz">0.00 kHz</div>
+        </div>
+
+        <!-- PERIOD -->
+        <div class="glass-card rounded-xl p-3 border-r-4 border-r-indigo-500">
+          <div class="text-xs text-slate-400 mb-1">الزمن الدوري (Period)</div>
+          <div class="text-xl sm:text-2xl font-black font-mono text-indigo-400" id="valPeriod">0.00 <span class="text-xs text-slate-500 font-sans">µs</span></div>
+          <div class="text-[10px] text-slate-500 font-mono" id="valPeriodMs">0.00 ms</div>
+        </div>
+
+        <!-- DUTY CYCLE POS -->
+        <div class="glass-card rounded-xl p-3 border-r-4 border-r-teal-500">
+          <div class="text-xs text-slate-400 mb-1">دورة التشغيل (+Duty)</div>
+          <div class="text-xl sm:text-2xl font-black font-mono text-teal-400" id="valDutyPos">0.0 <span class="text-xs text-slate-500 font-sans">%</span></div>
+          <div class="text-[10px] text-slate-500 font-mono" id="valDutyNeg">السالبة: 0.0%</div>
+        </div>
+
+        <!-- PULSE WIDTH -->
+        <div class="glass-card rounded-xl p-3 border-r-4 border-r-rose-500">
+          <div class="text-xs text-slate-400 mb-1">عرض النبضة (+PW)</div>
+          <div class="text-xl sm:text-2xl font-black font-mono text-rose-400" id="valPwPos">0.00 <span class="text-xs text-slate-500 font-sans">µs</span></div>
+          <div class="text-[10px] text-slate-500 font-mono" id="valPwNeg">-PW: 0.00 µs</div>
+        </div>
+      </div>
+
+      <!-- SIGNAL TREND HISTORY CHART (60s) -->
+      <div class="glass-card rounded-2xl p-4 flex flex-col gap-2">
+        <div class="flex items-center justify-between text-xs text-slate-400">
+          <span class="font-bold flex items-center gap-1.5 text-slate-200">
+            📈 سجل استقرار الجهد والتموج عبر الوقت (Voltage & Ripple Trend)
+          </span>
+          <span class="font-mono text-[10px] text-slate-500">آخر 60 قراءة</span>
+        </div>
+        <div class="h-28 w-full bg-slate-950/70 rounded-xl p-2 border border-slate-800 relative">
+          <canvas id="trendCanvas" width="600" height="100" class="w-full h-full block"></canvas>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- RIGHT SECTION: AI CIRCUIT DOCTOR STATION (5 COLS) -->
+    <div class="xl:col-span-5 flex flex-col gap-6">
+
+      <!-- AI DOCTOR CARD -->
+      <div class="glass-card rounded-2xl p-5 flex flex-col gap-5 border-t-4 border-t-emerald-500 shadow-xl">
+
+        <!-- HEADER -->
+        <div class="flex items-center justify-between">
+          <div class="flex items-center gap-3">
+            <div class="w-10 h-10 rounded-xl bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center text-xl">
+              🩺
+            </div>
+            <div>
+              <h2 class="text-lg font-black text-white">طبيب الدوائر بالذكاء الاصطناعي</h2>
+              <p class="text-xs text-slate-400">AI Circuit Fault Diagnoser & Health Analyzer</p>
+            </div>
+          </div>
+          <span class="text-xs px-2.5 py-1 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-mono">v2.0 Active</span>
+        </div>
+
+        <!-- SELECT TARGET BENCHMARK -->
+        <div class="flex flex-col gap-2">
+          <label class="text-xs font-bold text-slate-300">اختر نقطة الاختبار / خط التغذية المفحوص:</label>
+          <div class="relative">
+            <select id="targetProfileSelect" onchange="onProfileChange()" class="w-full bg-slate-900 border border-slate-700 text-slate-100 rounded-xl px-4 py-2.5 text-sm appearance-none focus:outline-none focus:border-emerald-500 transition cursor-pointer">
+              <option value="5V_RAIL">⚡ خط تغذية 5.0V (VCC / Logic)</option>
+              <option value="3V3_RAIL" selected>⚡ خط تغذية 3.3V (LDO / MCU)</option>
+              <option value="1V8_RAIL">⚡ خط جهد القلب 1.8V (Core Voltage)</option>
+              <option value="12V_RAIL">⚡ خط تغذية 12V (محركات / باور)</option>
+              <option value="USB_5V">🔌 جهد منفذ الـ USB (VBUS 5V)</option>
+              <option value="CLOCK_XTAL">⏱️ إشارة الساعة / الكريستالة (Clock / XTAL)</option>
+              <option value="PWM_SIGNAL">🔄 إشارة تعديل عرض النبضة (PWM)</option>
+              <option value="CUSTOM">🎛️ فحص مخصص (أدخل الفولت والتموج يدوياً)</option>
+            </select>
+            <div class="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400">▼</div>
+          </div>
+          <p id="profileDesc" class="text-xs text-slate-400 leading-relaxed"></p>
+        </div>
+
+        <!-- CUSTOM PARAMS ACCORDION (HIDDEN BY DEFAULT) -->
+        <div id="customParamsDiv" class="hidden grid-cols-3 gap-2 p-3 rounded-xl bg-slate-900/90 border border-slate-800">
+          <div>
+            <label class="text-[10px] text-slate-400 block mb-1">الجهد المتوقع (V):</label>
+            <input id="customExpV" type="number" step="0.1" value="5.0" class="w-full bg-slate-950 border border-slate-700 rounded px-2 py-1 text-xs text-white font-mono" />
+          </div>
+          <div>
+            <label class="text-[10px] text-slate-400 block mb-1">التسامح (±%):</label>
+            <input id="customTol" type="number" step="1" value="5" class="w-full bg-slate-950 border border-slate-700 rounded px-2 py-1 text-xs text-white font-mono" />
+          </div>
+          <div>
+            <label class="text-[10px] text-slate-400 block mb-1">أقصى تموج (mV):</label>
+            <input id="customRipple" type="number" step="10" value="100" class="w-full bg-slate-950 border border-slate-700 rounded px-2 py-1 text-xs text-white font-mono" />
+          </div>
+        </div>
+
+        <!-- DIAGNOSE BUTTON -->
+        <button onclick="runAIDiagnosis()" class="w-full py-3 px-4 rounded-xl bg-gradient-to-r from-emerald-600 via-teal-600 to-emerald-500 hover:from-emerald-500 hover:to-teal-400 text-black font-black text-sm transition shadow-lg shadow-emerald-950/60 active:scale-[0.98] flex items-center justify-center gap-2">
+          <span>⚡</span>
+          <span>تشخيص فوري بالعقل الاصطناعي (Analyze Now)</span>
+        </button>
+
+        <!-- HEALTH SCORE CIRCULAR GAUGE & TITLE -->
+        <div class="flex items-center gap-5 p-4 rounded-xl bg-slate-900/60 border border-slate-800">
+          <div class="relative w-24 h-24 shrink-0 flex items-center justify-center">
+            <svg class="w-full h-full -rotate-90" viewBox="0 0 36 36">
+              <path class="text-slate-800" stroke-width="3.5" stroke="currentColor" fill="none" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" />
+              <path id="healthCircle" class="text-emerald-500 transition-all duration-700 ease-out" stroke-dasharray="100, 100" stroke-width="3.5" stroke-linecap="round" stroke="currentColor" fill="none" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" />
+            </svg>
+            <div class="absolute inset-0 flex flex-col items-center justify-center text-center">
+              <span id="healthScoreNum" class="text-2xl font-black font-mono text-white">100%</span>
+              <span class="text-[9px] text-slate-400 uppercase tracking-wider">Health</span>
+            </div>
+          </div>
+
+          <div class="flex flex-col gap-1">
+            <span id="severityBadge" class="w-fit text-[11px] font-bold px-2.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
+              حالة ممتازة (PASS)
+            </span>
+            <h3 id="diagnosisTitle" class="text-sm font-bold text-slate-100 leading-snug">
+              النقطة المختبرة تعمل بكفاءة تامة ضمن المواصفات.
+            </h3>
+          </div>
+        </div>
+
+        <!-- DIAGNOSIS FINDINGS & ACTION PLAN -->
+        <div class="flex flex-col gap-3">
+          <h4 class="text-xs font-black text-slate-300 flex items-center gap-1.5">
+            <span>📋</span>
+            <span>النتائج الهندسية المرصودة (Observations):</span>
+          </h4>
+          <div id="findingsContainer" class="flex flex-col gap-2 max-h-48 overflow-y-auto pr-1">
+            <!-- Dynamic findings cards -->
+          </div>
+
+          <h4 class="text-xs font-black text-slate-300 flex items-center gap-1.5 mt-2">
+            <span>🔧</span>
+            <span>خطوات الفحص والإصلاح الموصى بها (Action Steps):</span>
+          </h4>
+          <div id="recommendationsContainer" class="flex flex-col gap-2 max-h-48 overflow-y-auto pr-1">
+            <!-- Dynamic repair steps -->
+          </div>
+        </div>
+
+      </div>
+
+    </div>
+
+  </main>
+
+  <!-- TOAST NOTIFICATIONS -->
+  <div id="toast" class="fixed bottom-6 left-6 z-50 transform translate-y-20 opacity-0 transition-all duration-300 px-4 py-3 rounded-xl shadow-2xl flex items-center gap-3 text-sm border font-medium">
+    <span id="toastIcon"></span>
+    <span id="toastMsg"></span>
+  </div>
+
+  <script>
+    // GLOBALS
+    let ws = null;
+    let latestData = null;
+    let isFrozen = false;
+    let frameCount = 0;
+    let lastFpsTime = Date.now();
+    let currentFps = 0;
+    let trendHistory = [];
+
+    const canvas = document.getElementById('scopeCanvas');
+    const ctx = canvas.getContext('2d');
+    const trendCanvas = document.getElementById('trendCanvas');
+    const trendCtx = trendCanvas.getContext('2d');
+
+    // INITIALIZATION
+    window.addEventListener('DOMContentLoaded', () => {
+      onProfileChange();
+      connectWebSocket();
+      requestAnimationFrame(renderScopeLoop);
+      setInterval(updateFpsCounter, 1000);
+      setInterval(autoRunDoctorIfSelected, 2000); // Live AI checks
+    });
+
+    // WEBSOCKET TELEMETRY CLIENT
+    function connectWebSocket() {
+      const loc = window.location;
+      const wsUrl = (loc.protocol === 'https:' ? 'wss://' : 'ws://') + loc.host + '/ws/telemetry';
+      
+      const connBadge = document.getElementById('connBadge');
+      const connDot = document.getElementById('connDot');
+      const connText = document.getElementById('connText');
+
+      ws = new WebSocket(wsUrl);
+
+      ws.onopen = () => {
+        connDot.className = 'w-2.5 h-2.5 rounded-full bg-emerald-400 pulse-green';
+        connText.innerText = 'متصل (Live 9600)';
+        connText.className = 'font-mono text-xs text-emerald-400 font-bold';
+      };
+
+      ws.onmessage = (event) => {
+        try {
+          const msg = JSON.parse(event.data);
+          if (msg.type === 'telemetry') {
+            frameCount++;
+            latestData = msg.data;
+            if (!isFrozen) {
+              updateDashboard(latestData);
+            }
+          }
+        } catch (e) {
+          console.error("WS Parse error", e);
+        }
+      };
+
+      ws.onclose = () => {
+        connDot.className = 'w-2.5 h-2.5 rounded-full bg-rose-500 pulse-red';
+        connText.innerText = 'انقطع الاتصال - جاري الإعادة';
+        connText.className = 'font-mono text-xs text-rose-400';
+        setTimeout(connectWebSocket, 1500);
+      };
+
+      ws.onerror = (err) => {
+        ws.close();
+      };
+    }
+
+    function updateFpsCounter() {
+      const now = Date.now();
+      const elapsed = (now - lastFpsTime) / 1000.0;
+      currentFps = Math.round(frameCount / elapsed);
+      frameCount = 0;
+      lastFpsTime = now;
+      document.getElementById('fpsDisplay').innerText = `${currentFps} FPS`;
+    }
+
+    // UPDATE NUMERIC DASHBOARD
+    function updateDashboard(d) {
+      if (!d) return;
+
+      // Voltages
+      document.getElementById('valVmax').innerHTML = `${d.v_max.toFixed(3)} <span class="text-xs text-slate-500 font-sans">V</span>`;
+      document.getElementById('valVmaxMv').innerText = `${(d.v_max * 1000).toFixed(1)} mV`;
+
+      document.getElementById('valVmin').innerHTML = `${d.v_min.toFixed(3)} <span class="text-xs text-slate-500 font-sans">V</span>`;
+      document.getElementById('valVminMv').innerText = `${(d.v_min * 1000).toFixed(1)} mV`;
+
+      document.getElementById('valVpp').innerHTML = `${d.v_pp.toFixed(3)} <span class="text-xs text-slate-500 font-sans">V</span>`;
+      document.getElementById('valVppMv').innerText = `${(d.v_pp * 1000).toFixed(1)} mVpp`;
+
+      document.getElementById('valVrms').innerHTML = `${d.v_rms.toFixed(3)} <span class="text-xs text-slate-500 font-sans">V</span>`;
+      document.getElementById('valVave').innerText = `المتوسط: ${d.v_ave.toFixed(3)} V`;
+
+      // Frequencies
+      if (d.frequency_hz >= 1000000) {
+        document.getElementById('valFreq').innerHTML = `${(d.frequency_hz / 1000000).toFixed(3)} <span class="text-xs text-slate-500 font-sans">MHz</span>`;
+      } else if (d.frequency_hz >= 1000) {
+        document.getElementById('valFreq').innerHTML = `${(d.frequency_hz / 1000).toFixed(2)} <span class="text-xs text-slate-500 font-sans">kHz</span>`;
+      } else {
+        document.getElementById('valFreq').innerHTML = `${d.frequency_hz.toFixed(1)} <span class="text-xs text-slate-500 font-sans">Hz</span>`;
+      }
+      document.getElementById('valFreqKhz').innerText = `${d.frequency_hz.toFixed(1)} Hz Raw`;
+
+      // Periods & Duty
+      document.getElementById('valPeriod').innerHTML = `${d.period_us.toFixed(2)} <span class="text-xs text-slate-500 font-sans">µs</span>`;
+      document.getElementById('valPeriodMs').innerText = `${(d.period_us / 1000).toFixed(4)} ms`;
+
+      document.getElementById('valDutyPos').innerHTML = `${d.duty_pos_pct.toFixed(1)} <span class="text-xs text-slate-500 font-sans">%</span>`;
+      document.getElementById('valDutyNeg').innerText = `السالبة: ${d.duty_neg_pct.toFixed(1)}%`;
+
+      document.getElementById('valPwPos').innerHTML = `${d.pw_pos_us.toFixed(2)} <span class="text-xs text-slate-500 font-sans">µs</span>`;
+      document.getElementById('valPwNeg').innerText = `-PW: ${d.pw_neg_us.toFixed(2)} µs`;
+
+      document.getElementById('trigLevel').innerText = `${(d.v_ave || 0).toFixed(2)} V`;
+
+      // Update Trend History
+      trendHistory.push({
+        v: d.v_max,
+        ripple: d.v_pp
+      });
+      if (trendHistory.length > 60) {
+        trendHistory.shift();
+      }
+      renderTrendChart();
+    }
+
+    // DRAW PHOSPHOR CRT OSCILLOSCOPE CANVAS (60 FPS)
+    let animPhase = 0;
+    function renderScopeLoop() {
+      const w = canvas.width;
+      const h = canvas.height;
+
+      // Clear with dark persistence fade
+      ctx.fillStyle = 'rgba(3, 15, 10, 0.4)';
+      ctx.fillRect(0, 0, w, h);
+
+      // Draw Grid (10 horizontal cells, 8 vertical cells)
+      const cols = 10;
+      const rows = 8;
+      const dx = w / cols;
+      const dy = h / rows;
+
+      ctx.save();
+      ctx.strokeStyle = 'rgba(16, 185, 129, 0.12)';
+      ctx.lineWidth = 1;
+
+      // Major grid lines
+      for (let i = 0; i <= cols; i++) {
+        ctx.beginPath();
+        ctx.moveTo(i * dx, 0);
+        ctx.lineTo(i * dx, h);
+        ctx.stroke();
+      }
+      for (let j = 0; j <= rows; j++) {
+        ctx.beginPath();
+        ctx.moveTo(0, j * dy);
+        ctx.lineTo(w, j * dy);
+        ctx.stroke();
+      }
+
+      // Center crosshairs tick marks
+      ctx.strokeStyle = 'rgba(16, 185, 129, 0.35)';
+      const midY = h / 2;
+      const midX = w / 2;
+
+      // Horizontal axis ticks
+      for (let x = 0; x < w; x += dx / 5) {
+        ctx.beginPath();
+        ctx.moveTo(x, midY - 3);
+        ctx.lineTo(x, midY + 3);
+        ctx.stroke();
+      }
+      // Vertical axis ticks
+      for (let y = 0; y < h; y += dy / 5) {
+        ctx.beginPath();
+        ctx.moveTo(midX - 3, y);
+        ctx.lineTo(midX + 3, y);
+        ctx.stroke();
+      }
+      ctx.restore();
+
+      // WAVEFORM SYNTHESIS & RENDERING
+      if (latestData) {
+        const vmax = latestData.v_max || 0;
+        const vmin = latestData.v_min || 0;
+        const vpp  = latestData.v_pp || 0;
+        const freq = latestData.frequency_hz || 0;
+        const duty = (latestData.duty_pos_pct || 50) / 100.0;
+
+        animPhase += (freq > 0 ? 0.08 : 0.01);
+
+        ctx.save();
+        ctx.strokeStyle = '#10b981';
+        ctx.shadowColor = '#00f5d4';
+        ctx.shadowBlur = 8;
+        ctx.lineWidth = 2.2;
+        ctx.beginPath();
+
+        // Calculate vertical scale mapping
+        // Baseline midY is 0V, each cell dy = 1V or adaptive
+        const voltSpan = Math.max(vmax - vmin, vpp, 1.0);
+        const scaleY = (dy * 2.5) / voltSpan;
+
+        const isAC = (freq > 50 && vpp > 0.08);
+
+        for (let x = 0; x < w; x++) {
+          const t = (x / w) * Math.PI * 8 + animPhase;
+          let yVal = 0;
+
+          if (isAC) {
+            // Reconstruct periodic signal based on duty cycle
+            const cyclePos = (t % (2 * Math.PI)) / (2 * Math.PI);
+            let waveVal = 0;
+            if (cyclePos < duty) {
+              waveVal = 1.0;
+            } else {
+              waveVal = -1.0;
+            }
+            // Add slight harmonic smoothing and measured ripple
+            waveVal = waveVal * 0.85 + Math.sin(t) * 0.15;
+            yVal = (latestData.v_ave || (vmax + vmin)/2) + waveVal * (vpp / 2);
+          } else {
+            // DC Rail with slight analog micro-noise matching vpp
+            const noise = (Math.random() - 0.5) * Math.max(vpp, 0.008);
+            yVal = vmax + noise;
+          }
+
+          const canvasY = midY - (yVal * (scaleY * 0.4));
+          const clampedY = Math.max(10, Math.min(h - 10, canvasY));
+
+          if (x === 0) {
+            ctx.moveTo(x, clampedY);
+          } else {
+            ctx.lineTo(x, clampedY);
+          }
+        }
+        ctx.stroke();
+
+        // Zero Baseline marker
+        ctx.fillStyle = 'rgba(56, 189, 248, 0.6)';
+        ctx.font = '10px JetBrains Mono';
+        ctx.fillText('0V ──', 5, midY + 3);
+
+        ctx.restore();
+      }
+
+      requestAnimationFrame(renderScopeLoop);
+    }
+
+    // RENDER TREND CHART
+    function renderTrendChart() {
+      const w = trendCanvas.width;
+      const h = trendCanvas.height;
+      trendCtx.clearRect(0, 0, w, h);
+
+      if (trendHistory.length < 2) return;
+
+      // Draw Voltage line
+      trendCtx.beginPath();
+      trendCtx.strokeStyle = '#10b981';
+      trendCtx.lineWidth = 2;
+      const step = w / (trendHistory.length - 1);
+
+      // Find max V for scaling
+      const maxV = Math.max(...trendHistory.map(p => p.v), 1.0) * 1.2;
+
+      for (let i = 0; i < trendHistory.length; i++) {
+        const x = i * step;
+        const y = h - (trendHistory[i].v / maxV) * h;
+        if (i === 0) trendCtx.moveTo(x, y);
+        else trendCtx.lineTo(x, y);
+      }
+      trendCtx.stroke();
+
+      // Draw Ripple Sparkline
+      trendCtx.beginPath();
+      trendCtx.strokeStyle = '#f59e0b';
+      trendCtx.lineWidth = 1.2;
+      const maxRipple = Math.max(...trendHistory.map(p => p.ripple), 0.1) * 1.5;
+
+      for (let i = 0; i < trendHistory.length; i++) {
+        const x = i * step;
+        const y = h - (trendHistory[i].ripple / maxRipple) * (h * 0.5);
+        if (i === 0) trendCtx.moveTo(x, y);
+        else trendCtx.lineTo(x, y);
+      }
+      trendCtx.stroke();
+    }
+
+    // PROFILE CHANGE HANDLER
+    const PROFILE_DESCS = {
+      "5V_RAIL": "خط التغذية القياسي 5 فولت لدوائر المنطق والمتحكمات وحساسات الأردينو.",
+      "3V3_RAIL": "خط تغذية المعالجات الحديثة (STM32, ESP32, CH32) ومنظمات الجهد LDO.",
+      "1V8_RAIL": "جهد التغذية الحساس لأنوية المعالجات وذواكر DDR والشرائح المتقدمة.",
+      "12V_RAIL": "خط 12 فولت لتغذية الريليهات والمراوح ومراحل القدرة والسيارات.",
+      "USB_5V": "خط الطاقة القادم من شواحن ومنافذ الـ USB (4.75V - 5.25V).",
+      "CLOCK_XTAL": "مذبذبات التردد وكريستالات التوقيت للميكروكنترولر والدوائر الرقمية.",
+      "PWM_SIGNAL": "إشارات التحكم في سرعة المحركات، إضاءة الـ LED، والإنفرتر.",
+      "CUSTOM": "إدخال يدوي للجهد المتوقع ونسبة التسامح والتموج المطلوب فحصها."
+    };
+
+    function onProfileChange() {
+      const sel = document.getElementById('targetProfileSelect').value;
+      document.getElementById('profileDesc').innerText = PROFILE_DESCS[sel] || "";
+      const customDiv = document.getElementById('customParamsDiv');
+      if (sel === 'CUSTOM') {
+        customDiv.classList.remove('hidden');
+        customDiv.classList.add('grid');
+      } else {
+        customDiv.classList.add('hidden');
+        customDiv.classList.remove('grid');
+      }
+      runAIDiagnosis();
+    }
+
+    // RUN AI DIAGNOSIS
+    let lastDiagnoseTime = 0;
+    function autoRunDoctorIfSelected() {
+      const now = Date.now();
+      if (now - lastDiagnoseTime > 3000) {
+        runAIDiagnosis(true);
+      }
+    }
+
+    async function runAIDiagnosis(silent = false) {
+      lastDiagnoseTime = Date.now();
+      const profile = document.getElementById('targetProfileSelect').value;
+      const payload = {
+        profile_id: profile,
+        custom_params: {
+          expected_v: parseFloat(document.getElementById('customExpV')?.value || 5.0),
+          tolerance_pct: parseFloat(document.getElementById('customTol')?.value || 5.0),
+          max_ripple_v: parseFloat(document.getElementById('customRipple')?.value || 100.0) / 1000.0
+        }
+      };
+
+      try {
+        const res = await fetch('/api/diagnose', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        const data = await res.json();
+        renderAIDiagnosis(data);
+        if (!silent) {
+          showToast("تم تحديث الفحص الذكي بنجاح", "success");
+        }
+      } catch (err) {
+        console.error("Diagnosis error", err);
+      }
+    }
+
+    function renderAIDiagnosis(diag) {
+      if (!diag) return;
+
+      const score = diag.health_score;
+      document.getElementById('healthScoreNum').innerText = `${score}%`;
+
+      // Update circle stroke-dasharray
+      const circle = document.getElementById('healthCircle');
+      circle.setAttribute('stroke-dasharray', `${score}, 100`);
+
+      const badge = document.getElementById('severityBadge');
+      if (diag.severity === 'CRITICAL' || score < 50) {
+        circle.setAttribute('class', 'text-rose-500 transition-all duration-700 ease-out');
+        badge.className = 'w-fit text-[11px] font-bold px-2.5 py-0.5 rounded-full bg-rose-500/20 text-rose-400 border border-rose-500/30';
+        badge.innerText = 'عطل حرج (CRITICAL)';
+      } else if (diag.severity === 'WARNING' || score < 85) {
+        circle.setAttribute('class', 'text-amber-500 transition-all duration-700 ease-out');
+        badge.className = 'w-fit text-[11px] font-bold px-2.5 py-0.5 rounded-full bg-amber-500/20 text-amber-400 border border-amber-500/30';
+        badge.innerText = 'تحذير / خلل (WARNING)';
+      } else {
+        circle.setAttribute('class', 'text-emerald-500 transition-all duration-700 ease-out');
+        badge.className = 'w-fit text-[11px] font-bold px-2.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/30';
+        badge.innerText = 'حالة ممتازة (PASS)';
+      }
+
+      document.getElementById('diagnosisTitle').innerText = diag.status_title_ar;
+
+      // Findings container
+      const findingsDiv = document.getElementById('findingsContainer');
+      findingsDiv.innerHTML = '';
+      if (diag.findings && diag.findings.length > 0) {
+        diag.findings.forEach(f => {
+          const item = document.createElement('div');
+          let colorClass = "border-emerald-500/40 bg-emerald-950/20 text-emerald-300";
+          if (f.level === 'CRITICAL') colorClass = "border-rose-500/40 bg-rose-950/20 text-rose-300";
+          if (f.level === 'WARNING') colorClass = "border-amber-500/40 bg-amber-950/20 text-amber-300";
+          if (f.level === 'INFO') colorClass = "border-blue-500/40 bg-blue-950/20 text-blue-300";
+
+          item.className = `p-2.5 rounded-xl border ${colorClass} text-xs`;
+          item.innerHTML = `
+            <div class="font-bold flex items-center justify-between">
+              <span>${f.title_ar}</span>
+              <span class="text-[9px] uppercase px-1.5 py-0.5 rounded bg-black/40 font-mono">${f.level}</span>
+            </div>
+            <div class="text-slate-300 mt-1 leading-relaxed text-[11px]">${f.detail_ar}</div>
+          `;
+          findingsDiv.appendChild(item);
+        });
+      }
+
+      // Recommendations container
+      const recsDiv = document.getElementById('recommendationsContainer');
+      recsDiv.innerHTML = '';
+      if (diag.recommendations && diag.recommendations.length > 0) {
+        diag.recommendations.forEach((r, idx) => {
+          const item = document.createElement('div');
+          item.className = 'flex items-start gap-2 p-2 rounded-lg bg-slate-900/80 border border-slate-800 text-xs text-slate-200';
+          item.innerHTML = `
+            <span class="w-5 h-5 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 font-mono text-[10px] flex items-center justify-center shrink-0 mt-0.5 font-bold">${idx + 1}</span>
+            <span class="leading-relaxed text-[11px]">${r.step_ar}</span>
+          `;
+          recsDiv.appendChild(item);
+        });
+      }
+    }
+
+    // HARDWARE REMOTE CONTROLS
+    async function triggerAuto() {
+      const btn = document.getElementById('btnAuto');
+      btn.disabled = true;
+      btn.innerHTML = `<span class="animate-spin text-sm">⏳</span><span>جاري الضبط...</span>`;
+      showToast("جاري إرسال أمر المعايرة التلقائية (AUTO SET) للجهاز...", "info");
+
+      try {
+        const res = await fetch('/api/auto', { method: 'POST' });
+        const data = await res.json();
+        if (data.status === 'ok') {
+          showToast("تم تنفيذ المعايرة التلقائية بنجاح!", "success");
+        } else {
+          showToast("تعذر إرسال الأمر للجهاز", "error");
+        }
+      } catch (e) {
+        showToast("خطأ في الاتصال بالخادم", "error");
+      } finally {
+        setTimeout(() => {
+          btn.disabled = false;
+          btn.innerHTML = `<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg><span>AUTO SET</span>`;
+        }, 1200);
+      }
+    }
+
+    async function toggleFreeze() {
+      try {
+        const res = await fetch('/api/freeze', { method: 'POST' });
+        const data = await res.json();
+        isFrozen = data.is_frozen;
+        const icon = document.getElementById('freezeIcon');
+        const text = document.getElementById('freezeText');
+        const badge = document.getElementById('scopeModeBadge');
+
+        if (isFrozen) {
+          icon.innerText = '▶️';
+          text.innerText = 'استئناف (Run)';
+          badge.innerText = 'STOP';
+          badge.className = 'bg-rose-950/80 text-rose-400 px-2 py-0.5 rounded border border-rose-800/40 font-bold';
+          showToast("تم تجميد الشاشة وحفظ القراءة الحالية", "info");
+        } else {
+          icon.innerText = '⏸️';
+          text.innerText = 'تجميد (Hold)';
+          badge.innerText = 'AUTO';
+          badge.className = 'bg-emerald-950/80 text-emerald-400 px-2 py-0.5 rounded border border-emerald-800/40';
+          showToast("تم استئناف القراءة الحية", "success");
+        }
+      } catch (e) {
+        console.error(e);
+      }
+    }
+
+    function exportCSV() {
+      window.location.href = '/api/export';
+    }
+
+    // TOAST NOTIFICATION HELPER
+    let toastTimeout;
+    function showToast(msg, type = "info") {
+      const toast = document.getElementById('toast');
+      const icon = document.getElementById('toastIcon');
+      const text = document.getElementById('toastMsg');
+
+      clearTimeout(toastTimeout);
+      text.innerText = msg;
+
+      if (type === 'success') {
+        toast.className = 'fixed bottom-6 left-6 z-50 transition-all duration-300 px-4 py-3 rounded-xl shadow-2xl flex items-center gap-3 text-sm border font-medium bg-emerald-950 border-emerald-500/50 text-emerald-200 translate-y-0 opacity-100';
+        icon.innerText = '✅';
+      } else if (type === 'error') {
+        toast.className = 'fixed bottom-6 left-6 z-50 transition-all duration-300 px-4 py-3 rounded-xl shadow-2xl flex items-center gap-3 text-sm border font-medium bg-rose-950 border-rose-500/50 text-rose-200 translate-y-0 opacity-100';
+        icon.innerText = '❌';
+      } else {
+        toast.className = 'fixed bottom-6 left-6 z-50 transition-all duration-300 px-4 py-3 rounded-xl shadow-2xl flex items-center gap-3 text-sm border font-medium bg-slate-900 border-slate-700 text-slate-200 translate-y-0 opacity-100';
+        icon.innerText = 'ℹ️';
+      }
+
+      toastTimeout = setTimeout(() => {
+        toast.classList.add('translate-y-20', 'opacity-0');
+      }, 3500);
+    }
+  </script>
+</body>
+</html>
