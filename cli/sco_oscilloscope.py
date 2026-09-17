@@ -45,8 +45,7 @@ def main():
 
         for i in range(args.count):
             # Query hardware directly using unified driver method
-            with driver._serial_lock:
-                m = driver._query_device_serial()
+            m = driver.read_once()
 
             if not m:
                 print(f"[WARN] Sample {i+1}/{args.count}: No response from oscilloscope. Is it powered ON?")

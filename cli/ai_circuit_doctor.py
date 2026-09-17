@@ -52,8 +52,7 @@ def main():
 
         # Query hardware
         print("[ACTION] Querying 12 live electrical parameters (0x02)...")
-        with driver._serial_lock:
-            m = driver._query_device_serial()
+        m = driver.read_once()
 
         if not m:
             print("[ERROR] No response received from oscilloscope! Ensure scope is powered ON.")

@@ -95,12 +95,19 @@ async def toggle_freeze():
 @app.post("/api/set_port")
 async def set_port(req: PortSwitchRequest):
     new_port = req.port.strip()
-    if new_port:
+    if not new_port or len(new_port) > 128 or any(c in new_port for c in "\r\n\0"):
+        return {"status": "error", "message": "Invalid port name"}
+
+    def _restart():
+        # driver.stop() joins the worker thread (up to 1s) and closes the serial
+        # bus, so it must never run on the event loop.
         driver.stop()
         driver.port = new_port
         driver.start()
-        return {"status": "ok", "port": driver.port}
-    return {"status": "error", "message": "Invalid port name"}
+        return driver.port
+
+    port = await asyncio.to_thread(_restart)
+    return {"status": "ok", "port": port}
 
 # 6. CIRCUIT BENCHMARK PROFILES
 @app.get("/api/profiles")
@@ -155,7 +162,7 @@ async def ws_telemetry(websocket: WebSocket):
     except (WebSocketDisconnect, asyncio.CancelledError):
         pass
     except Exception as e:
-        pass
+        print(f"[WS ERROR] {type(e).__name__}: {e}", file=sys.stderr)
 
 if __name__ == "__main__":
     import uvicorn

@@ -13,6 +13,7 @@ Comprehensive tests covering:
 
 import sys
 import os
+import time
 import struct
 import unittest
 
@@ -25,6 +26,63 @@ from fastapi.testclient import TestClient
 from app import app
 
 
+class FakeSerial:
+    """
+    Minimal pyserial stand-in so the tests exercise the REAL driver code path
+    (framing, resync, scaling, clamping) instead of re-implementing the
+    arithmetic inside the assertions.
+    """
+
+    def __init__(self, data: bytes = b""):
+        self.is_open = True
+        self.buf = bytearray(data)
+        self.written = bytearray()
+
+    def feed(self, data: bytes):
+        self.buf.extend(data)
+
+    def reset_input_buffer(self):
+        pass
+
+    def reset_output_buffer(self):
+        pass
+
+    def write(self, data):
+        self.written.extend(data)
+        return len(data)
+
+    def read(self, n=1):
+        if not self.buf:
+            time.sleep(0.01)  # emulate a blocking read so tests do not busy-spin
+            return b""
+        out = bytes(self.buf[:n])
+        del self.buf[:n]
+        return out
+
+    def close(self):
+        self.is_open = False
+
+
+def build_packet(raw_vals, signs=(0, 0, 0, 0), prefix=b"") -> bytes:
+    return prefix + HEADER + struct.pack("<12I", *raw_vals) + bytes(signs)
+
+
+NOMINAL_RAW = (
+    3350000,    # vmax = 3.35 V
+    3250000,    # vmin = 3.25 V
+    3300000,    # vave = 3.30 V
+    100000,     # vpp  = 0.10 V
+    3350000,    # vp   = 3.35 V
+    3301000,    # vrms = 3.301 V
+    100,        # period = 100 ticks x 10ns = 1.0 us
+    100000000,  # freq  = 1e8 centi-Hz = 1.0 MHz
+    500,        # duty+ = 50.0 %
+    500,        # duty- = 50.0 %
+    50,         # pw+   = 0.5 us
+    50,         # pw-   = 0.5 us
+)
+
+
 class TestDriverMathAndFraming(unittest.TestCase):
     def setUp(self):
         self.driver = SCODriver(port="COM_TEST")
@@ -34,65 +92,78 @@ class TestDriverMathAndFraming(unittest.TestCase):
         packet = prefix + HEADER + payload + bytes(signs)
         return packet
 
-    def test_unit_conversions_nominal(self):
-        # 3.3V nominal with 50mV ripple, 1MHz clock (1us period), 50% duty
-        raw = (
-            3350000,  # vmax = 3.35V
-            3250000,  # vmin = 3.25V
-            3300000,  # vave = 3.30V
-            100000,   # vpp  = 0.10V (100mV)
-            3350000,  # vp   = 3.35V
-            3301000,  # vrms = 3.301V
-            100,      # period = 100 ticks (100 * 10ns = 1.0 us)
-            100000000,# freq = 100,000,000 centi-Hz = 1,000,000.0 Hz (1 MHz)
-            500,      # duty+ = 50.0%
-            500,      # duty- = 50.0%
-            50,       # pw+ = 50 ticks = 0.5 us
-            50        # pw- = 50 ticks = 0.5 us
-        )
-        signs = (0, 0, 0, 0)
-        packet = self._build_packet(raw, signs)
-        
-        # Test sanity check
-        self.assertEqual(len(packet), 55)
-        self.assertTrue(packet.startswith(HEADER))
-        
-        # Check scale factors
-        vmax = raw[0] / 1_000_000.0
-        self.assertAlmostEqual(vmax, 3.35, places=3)
-        
-        freq_hz = raw[7] / 100.0
-        self.assertEqual(freq_hz, 1_000_000.0)
-        
-        period_us = (raw[6] * 10.0) / 1000.0
-        self.assertAlmostEqual(period_us, 1.0, places=3)
-        
-        duty_pct = raw[8] * 0.1
-        self.assertEqual(duty_pct, 50.0)
+    def _driver_with(self, data: bytes) -> SCODriver:
+        drv = SCODriver(port="COM_TEST")
+        drv.ser = FakeSerial(data)
+        return drv
 
-    def test_signed_negative_voltages(self):
-        raw = [1500000, 2500000, 500000, 4000000, 2500000, 1800000, 200, 5000000, 500, 500, 100, 100]
-        # signs: vmax pos (0), vmin neg (1), vave neg (1), vp neg (1)
-        signs = [0, 1, 1, 1]
-        
-        vmin = -raw[1] / 1_000_000.0
-        vave = -raw[2] / 1_000_000.0
-        self.assertAlmostEqual(vmin, -2.5, places=3)
-        self.assertAlmostEqual(vave, -0.5, places=3)
+    def test_unit_conversions_through_real_driver(self):
+        """Scaling must be asserted on the driver's OUTPUT, not recomputed here."""
+        drv = self._driver_with(build_packet(NOMINAL_RAW))
+        m = drv.read_once()
+        self.assertIsNotNone(m)
+        self.assertAlmostEqual(m["v_max"], 3.35, places=3)
+        self.assertAlmostEqual(m["v_ave"], 3.30, places=3)
+        self.assertAlmostEqual(m["v_pp"], 0.10, places=3)
+        self.assertEqual(m["frequency_hz"], 1_000_000.0)
+        self.assertAlmostEqual(m["period_us"], 1.0, places=3)
+        self.assertEqual(m["duty_pos_pct"], 50.0)
+        self.assertAlmostEqual(m["pw_pos_us"], 0.5, places=3)
+        self.assertEqual(m["overflow"], [])
 
-    def test_sanity_checks_rejects_corrupted_packet(self):
-        # Invalid sign byte (> 1)
+    def test_request_command_is_sent(self):
+        drv = self._driver_with(build_packet(NOMINAL_RAW))
+        drv.read_once()
+        self.assertEqual(bytes(drv.ser.written), bytes([0x02, 0x02]))
+
+    def test_frame_resync_drops_leading_garbage(self):
+        noise = b"\x00\xff\xab\xcd" * 7  # includes a partial header
+        drv = self._driver_with(build_packet(NOMINAL_RAW, prefix=noise))
+        m = drv.read_once()
+        self.assertIsNotNone(m)
+        self.assertAlmostEqual(m["v_max"], 3.35, places=3)
+
+    def test_negative_voltages_through_real_driver(self):
+        raw = [1500000, 2500000, 500000, 4000000, 2500000, 1800000,
+               200, 5000000, 500, 500, 100, 100]
+        drv = self._driver_with(build_packet(raw, signs=(0, 1, 1, 1)))
+        m = drv.read_once()
+        self.assertAlmostEqual(m["v_max"], 1.5, places=3)
+        self.assertAlmostEqual(m["v_min"], -2.5, places=3)
+        self.assertAlmostEqual(m["v_ave"], -0.5, places=3)
+        self.assertAlmostEqual(m["v_peak"], -2.5, places=3)
+
+    def test_illegal_sign_byte_rejects_frame(self):
         raw = [5000000] * 12
-        corrupted_signs = [0, 0, 2, 0]  # 2 is illegal sign!
-        packet = self._build_packet(raw, corrupted_signs)
-        signs = packet[51:55]
-        is_valid_signs = all(s in (0, 1) for s in signs)
-        self.assertFalse(is_valid_signs)
+        drv = self._driver_with(build_packet(raw, signs=(0, 0, 2, 0)))
+        self.assertIsNone(drv.read_once())
 
-        # Invalid duty cycle (> 1000)
-        raw_bad_duty = list(raw)
-        raw_bad_duty[8] = 1200  # 120.0% is impossible
-        self.assertTrue(raw_bad_duty[8] > 1000)
+    def test_overflow_duty_is_clamped_not_dropped(self):
+        """
+        The firmware has explicit per-field overflow states. An out-of-range duty
+        must NOT discard the frame - that made a healthy device look disconnected.
+        """
+        raw = list(NOMINAL_RAW)
+        raw[8] = 0xFFFFFFFF
+        drv = self._driver_with(build_packet(raw))
+        m = drv.read_once()
+        self.assertIsNotNone(m, "valid frame was discarded because of one overflow field")
+        self.assertEqual(m["duty_pos_pct"], 100.0)
+        self.assertIn("duty_pos", m["overflow"])
+        self.assertAlmostEqual(m["v_max"], 3.35, places=3)
+
+    def test_overflow_voltage_is_clamped_to_instrument_range(self):
+        raw = list(NOMINAL_RAW)
+        raw[0] = 4_000_000_000  # 4000 V, far beyond the +/-400V range
+        drv = self._driver_with(build_packet(raw))
+        m = drv.read_once()
+        self.assertIsNotNone(m)
+        self.assertEqual(m["v_max"], 400.0)
+        self.assertIn("v_max", m["overflow"])
+
+    def test_truncated_frame_returns_none(self):
+        drv = self._driver_with(build_packet(NOMINAL_RAW)[:40])
+        self.assertIsNone(drv.read_once())
 
 
 class TestAICircuitDoctor(unittest.TestCase):
@@ -154,6 +225,76 @@ class TestAICircuitDoctor(unittest.TestCase):
         # Non-numeric values must not raise ValueError
         res = AICircuitDoctor.diagnose_point("CUSTOM", m, {"expected_v": "invalid", "tolerance_pct": "abc", "max_ripple_v": None})
         self.assertEqual(res["severity"], "NORMAL")
+
+
+    def test_12v_rail_just_below_tolerance_is_moderate(self):
+        """
+        12V profile has a 10% tolerance. 10.79V is 0.01V under the window - a
+        marginal sag, not a critical fault. The old fixed 10% cut-off made the
+        moderate tier unreachable for every profile with tolerance >= 10%.
+        """
+        m = {"v_max": 10.85, "v_ave": 10.79, "v_pp": 0.20, "frequency_hz": 0, "connected": True}
+        res = AICircuitDoctor.diagnose_point("12V_RAIL", m)
+        self.assertEqual(res["severity"], "WARNING")
+        self.assertIn("انخفاض طفيف", res["status_title_ar"])
+
+    def test_12v_rail_deep_sag_is_still_critical(self):
+        m = {"v_max": 9.20, "v_ave": 9.00, "v_pp": 0.20, "frequency_hz": 0, "connected": True}
+        res = AICircuitDoctor.diagnose_point("12V_RAIL", m)
+        self.assertEqual(res["severity"], "CRITICAL")
+        self.assertIn("هبوط حاد", res["status_title_ar"])
+
+    def test_headline_never_contradicts_its_own_severity(self):
+        """Moderate sag + heavy ripple used to yield 'عطل حرج: انخفاض طفيف'."""
+        m = {"v_max": 4.80, "v_ave": 4.60, "v_pp": 0.40, "frequency_hz": 0, "connected": True}
+        res = AICircuitDoctor.diagnose_point("5V_RAIL", m)
+        self.assertEqual(res["severity"], "CRITICAL")
+        self.assertNotIn("عطل حرج", res["status_title_ar"])
+        self.assertIn("تدهور مركّب", res["status_title_ar"])
+
+    def test_english_title_contains_no_arabic(self):
+        cases = [
+            ("5V_RAIL", {"v_max": 5.10, "v_ave": 5.00, "v_pp": 0.35}),
+            ("5V_RAIL", {"v_max": 4.80, "v_ave": 4.60, "v_pp": 0.40}),
+            ("12V_RAIL", {"v_max": 10.85, "v_ave": 10.79, "v_pp": 0.20}),
+            ("1V8_RAIL", {"v_max": 1.72, "v_ave": 1.70, "v_pp": 0.02}),
+            ("CLOCK_XTAL", {"v_max": 0.30, "v_ave": 0.15, "v_pp": 0.25, "frequency_hz": 16_000_000}),
+        ]
+        for pid, metrics in cases:
+            metrics.setdefault("frequency_hz", 0)
+            metrics["connected"] = True
+            res = AICircuitDoctor.diagnose_point(pid, metrics)
+            title_en = res["status_title_en"]
+            self.assertTrue(
+                all(ord(ch) < 0x0590 for ch in title_en),
+                f"Arabic text leaked into status_title_en for {pid}: {title_en}"
+            )
+
+    def test_moderate_overvoltage_is_not_a_fire_alarm(self):
+        # 12V rail at 13.4V: above tolerance, below the 2x-tolerance danger line
+        m = {"v_max": 13.5, "v_ave": 13.4, "v_pp": 0.20, "frequency_hz": 0, "connected": True}
+        res = AICircuitDoctor.diagnose_point("12V_RAIL", m)
+        self.assertEqual(res["severity"], "WARNING")
+
+    def test_severe_overvoltage_is_critical(self):
+        m = {"v_max": 6.60, "v_ave": 6.50, "v_pp": 0.05, "frequency_hz": 0, "connected": True}
+        res = AICircuitDoctor.diagnose_point("5V_RAIL", m)
+        self.assertEqual(res["severity"], "CRITICAL")
+        self.assertIn("ارتفاع خطر", res["status_title_ar"])
+
+
+    def test_overflow_flag_is_surfaced_to_the_technician(self):
+        m = {"v_max": 5.06, "v_ave": 5.00, "v_pp": 0.05, "frequency_hz": 0,
+             "connected": True, "overflow": ["duty_pos"]}
+        res = AICircuitDoctor.diagnose_point("5V_RAIL", m)
+        titles = [f["title_ar"] for f in res["findings"]]
+        self.assertTrue(any("Overflow" in t for t in titles))
+
+    def test_clamped_voltage_downgrades_the_verdict(self):
+        m = {"v_max": 400.0, "v_ave": 5.00, "v_pp": 0.05, "frequency_hz": 0,
+             "connected": True, "overflow": ["v_max"]}
+        res = AICircuitDoctor.diagnose_point("5V_RAIL", m)
+        self.assertEqual(res["severity"], "WARNING")
 
 
 class TestFastAPIServer(unittest.TestCase):

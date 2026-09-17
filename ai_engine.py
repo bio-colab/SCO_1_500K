@@ -110,6 +110,7 @@ class AICircuitDoctor:
                 "findings": [{
                     "level": "INFO",
                     "title_ar": "العتاد غير متصل أو مطفأ",
+                    "title_en": "Hardware Offline Or Powered Down",
                     "detail_ar": "الخادم يعمل ولكن لا يستقبل بيانات من جهاز الأوسيلوسكوب. تأكد من تشغيل الجهاز بالزر وتوصيل أسلاك السيريال (TX/RX/GND).",
                     "detail_en": "Serial port is offline. Ensure oscilloscope is powered ON and UART wiring is secure."
                 }],
@@ -181,6 +182,16 @@ class AICircuitDoctor:
             min_allowed = exp_v * (1.0 - tol_pct / 100.0)
             max_allowed = exp_v * (1.0 + tol_pct / 100.0)
 
+            # Deviation is always measured relative to the profile's own tolerance
+            # window. A fixed 10% cut-off would make the "moderate" tier
+            # unreachable for any profile whose tolerance is >= 10% (e.g. 12V).
+            # A deviation is "severe" only once it is twice the allowed tolerance,
+            # with a 10% floor for very tight rails (1.8V core @ 4%).
+            severe_ratio = max(0.10, 2.0 * tol_pct / 100.0)
+            deviation = ((vave - exp_v) / exp_v) if exp_v > 0 else 0.0
+            drop_pct = -deviation * 100.0
+            over_pct = deviation * 100.0
+
             # A. Dead Rail Check (0V)
             # Evaluate using vave and vmax together
             if vave < 0.25 and vmax < 0.35:
@@ -188,6 +199,7 @@ class AICircuitDoctor:
                 findings.append({
                     "level": "CRITICAL",
                     "title_ar": "غياب تام للجهد (Dead Rail / 0V)",
+                    "title_en": "Dead Rail (0V) - Short to GND or Open Circuit",
                     "detail_ar": f"متوسط الجهد المقاس {vave:.3f}V بينما المتوقع {exp_v:.2f}V. خط التغذية مفصول أو به قصر صريح (Short to GND).",
                     "detail_en": f"Measured average voltage is {vave:.3f}V vs nominal {exp_v:.2f}V. Power rail is dead."
                 })
@@ -204,13 +216,13 @@ class AICircuitDoctor:
                     "step_en": "If no short, verify input fuse, upstream regulator enable pin, or broken trace."
                 })
 
-            # B. Severe Voltage Sag (vave dropped by >=10% or severely below tolerance)
-            elif vave < min_allowed * 0.92 or ((exp_v - vave) / exp_v) >= 0.10:
-                drop_pct = ((exp_v - vave) / exp_v) * 100.0
+            # B. Severe Voltage Sag (below tolerance AND deviating by >= severe_ratio)
+            elif vave < min_allowed and (-deviation) >= severe_ratio:
                 health_score = max(10, health_score - 65)
                 findings.append({
                     "level": "CRITICAL",
                     "title_ar": f"هبوط حاد في الجهد بنسبة {drop_pct:.1f}% (Severe Voltage Sag)",
+                    "title_en": f"Severe Voltage Sag ({drop_pct:.1f}% below nominal)",
                     "detail_ar": f"متوسط الجهد {vave:.3f}V منهار تحت الحد الأدنى الآمن ({min_allowed:.2f}V). الخط يعاني من سحب تيار مفرط أو عجز في المنظم.",
                     "detail_en": f"Average DC voltage {vave:.3f}V is severely below minimum {min_allowed:.2f}V (-{drop_pct:.1f}% drop)."
                 })
@@ -225,11 +237,11 @@ class AICircuitDoctor:
 
             # C. Moderate Voltage Sag
             elif vave < min_allowed:
-                drop_pct = ((exp_v - vave) / exp_v) * 100.0
                 health_score = max(45, health_score - 35)
                 findings.append({
                     "level": "WARNING",
                     "title_ar": f"انخفاض طفيف في الجهد بنسبة {drop_pct:.1f}% (Voltage Sag)",
+                    "title_en": f"Moderate Voltage Sag ({drop_pct:.1f}% below nominal)",
                     "detail_ar": f"متوسط الجهد {vave:.3f}V أقل من نافذة التسامح ({min_allowed:.2f}V - {max_allowed:.2f}V).",
                     "detail_en": f"Average voltage {vave:.3f}V is below nominal lower bound {min_allowed:.2f}V."
                 })
@@ -238,13 +250,13 @@ class AICircuitDoctor:
                     "step_en": "Check feedback voltage divider network resistors around the voltage regulator."
                 })
 
-            # D. DC Over-Voltage (vave above upper tolerance)
-            elif vave > max_allowed:
-                over_pct = ((vave - exp_v) / exp_v) * 100.0
+            # D. DC Over-Voltage (vave above upper tolerance), same two tiers as the sag path
+            elif vave > max_allowed and deviation >= severe_ratio:
                 health_score = max(10, health_score - 70)
                 findings.append({
                     "level": "CRITICAL",
                     "title_ar": f"ارتفاع خطر في الجهد المستمر بنسبة +{over_pct:.1f}% (DC Over-Voltage)",
+                    "title_en": f"Dangerous DC Over-Voltage (+{over_pct:.1f}% above nominal)",
                     "detail_ar": f"متوسط الجهد {vave:.3f}V يتجاوز الحد الأقصى ({max_allowed:.2f}V). خطر احتراق الدوائر المتكاملة والأنوية!",
                     "detail_en": f"Average voltage {vave:.3f}V exceeds maximum safety threshold ({max_allowed:.2f}V)."
                 })
@@ -253,12 +265,27 @@ class AICircuitDoctor:
                     "step_en": "Power down immediately! Regulator high-side MOSFET may have punched through."
                 })
 
+            elif vave > max_allowed:
+                health_score = max(45, health_score - 35)
+                findings.append({
+                    "level": "WARNING",
+                    "title_ar": f"ارتفاع في الجهد المستمر بنسبة +{over_pct:.1f}% (Elevated DC Level)",
+                    "title_en": f"Elevated DC Level (+{over_pct:.1f}% above nominal)",
+                    "detail_ar": f"متوسط الجهد {vave:.3f}V أعلى من نافذة التسامح ({min_allowed:.2f}V - {max_allowed:.2f}V) دون أن يبلغ حدّ الخطر.",
+                    "detail_en": f"Average voltage {vave:.3f}V is above the tolerance window but below the danger threshold."
+                })
+                recommendations.append({
+                    "step_ar": "افحص مقاومات مجزئ التغذية الراجعة للمنظم، وتحقق من معايرة المجسّ قبل استبدال أي عنصر.",
+                    "step_en": "Check the regulator feedback divider, and verify probe calibration before replacing parts."
+                })
+
             # E. Ripple & Noise Evaluation (vpp evaluated independently of vave)
             if vpp > max_ripple * 2.5:
                 health_score = max(15, health_score - 45)
                 findings.append({
                     "level": "WARNING",
                     "title_ar": f"تموج وضوضاء كهربائية خطيرة ({vpp*1000:.1f} mVpp)",
+                    "title_en": f"Severe Ripple / Noise ({vpp*1000:.1f} mVpp)",
                     "detail_ar": f"التموج المقاس {vpp*1000:.1f} mVpp يتجاوز الحد الأقصى المسموح ({max_ripple*1000:.1f} mVpp) بأكثر من 250%!",
                     "detail_en": f"Ripple noise {vpp*1000:.1f} mVpp severely exceeds max tolerance ({max_ripple*1000:.1f} mVpp)."
                 })
@@ -275,6 +302,7 @@ class AICircuitDoctor:
                 findings.append({
                     "level": "WARNING",
                     "title_ar": f"تموج تشويش مرتفع ({vpp*1000:.1f} mVpp)",
+                    "title_en": f"Elevated Ripple ({vpp*1000:.1f} mVpp)",
                     "detail_ar": f"التموج المقاس {vpp*1000:.1f} mVpp أعلى من المعيار المثالي ({max_ripple*1000:.1f} mVpp).",
                     "detail_en": f"Ripple {vpp*1000:.1f} mVpp is elevated above threshold ({max_ripple*1000:.1f} mVpp)."
                 })
@@ -290,6 +318,7 @@ class AICircuitDoctor:
                 findings.append({
                     "level": "INFO",
                     "title_ar": f"رصد طفرات جهد عابرة (Overshoot Spikes: {vmax:.2f}V)",
+                    "title_en": f"Transient Overshoot Spikes ({vmax:.2f}V peak)",
                     "detail_ar": f"متوسط الجهد مستقر ({vave:.2f}V) ولكن توجد قمم عابرة تصل إلى {vmax:.2f}V ناجمة عن رنين التبديل أو المحاثة.",
                     "detail_en": f"Average voltage is stable ({vave:.2f}V) but transient spikes reach {vmax:.2f}V (switching overshoot)."
                 })
@@ -303,6 +332,7 @@ class AICircuitDoctor:
                 findings.append({
                     "level": "PASS",
                     "title_ar": "جهد التغذية مستقر ونظيف تماماً",
+                    "title_en": "Power Rail Nominal And Clean",
                     "detail_ar": f"متوسط الجهد: {vave:.3f}V ضمن التسامح المقبول (±{tol_pct}%)، والتموج {vpp*1000:.1f} mVpp ممتاز.",
                     "detail_en": f"DC level {vave:.3f}V is nominal and ripple {vpp*1000:.1f} mVpp is pristine."
                 })
@@ -321,6 +351,7 @@ class AICircuitDoctor:
                 findings.append({
                     "level": "CRITICAL",
                     "title_ar": "إشارة متوقفة تماماً (Flatline / 0 Hz)",
+                    "title_en": "Dead Clock / Flatline (0 Hz)",
                     "detail_ar": "لم يتم رصد أي تردد (0 Hz) أو نشاط نبضي. الكريستالة متوقفة أو المعالج في حالة تعليق كامل.",
                     "detail_en": "No clock oscillation or switching activity detected (0 Hz flatline)."
                 })
@@ -338,6 +369,7 @@ class AICircuitDoctor:
                 findings.append({
                     "level": "WARNING",
                     "title_ar": f"اتساع الإشارة ضعيف وغير كافٍ ({vpp:.2f}V < {min_amp:.2f}V)",
+                    "title_en": f"Weak Signal Amplitude ({vpp:.2f} Vpp < {min_amp:.2f} Vpp)",
                     "detail_ar": f"التذبذب موجود عند {freq:.1f} Hz ولكن اتساع القمة للقمة {vpp:.2f} Vpp أقل من الحد الأدنى المطلوب للمستويات المنطقية ({min_amp:.2f} Vpp).",
                     "detail_en": f"Oscillation active at {freq:.1f} Hz but amplitude {vpp:.2f} Vpp is below logic minimum ({min_amp:.2f} Vpp)."
                 })
@@ -353,6 +385,7 @@ class AICircuitDoctor:
                 findings.append({
                     "level": "PASS",
                     "title_ar": "نشاط التردد والنبض سليم ونشط",
+                    "title_en": "Oscillation Active And Healthy",
                     "detail_ar": f"التردد المرصود: {freq:.2f} Hz ({freq/1000.0:.2f} kHz)، اتساع القمة للقمة: {vpp:.3f} Vpp.",
                     "detail_en": f"Oscillation active at {freq:.2f} Hz with {vpp:.3f} Vpp amplitude."
                 })
@@ -360,6 +393,7 @@ class AICircuitDoctor:
                     findings.append({
                         "level": "INFO",
                         "title_ar": "نسبة دورة التشغيل (Duty Cycle)",
+                        "title_en": "Duty Cycle Reading",
                         "detail_ar": f"دورة التشغيل الموجبة: +{duty_pos:.1f}% / السالبة: -{m.get('duty_neg_pct', 0):.1f}%.",
                         "detail_en": f"Positive Duty: +{duty_pos:.1f}% / Negative Duty: -{m.get('duty_neg_pct', 0):.1f}%."
                     })
@@ -372,8 +406,26 @@ class AICircuitDoctor:
             findings.insert(0, {
                 "level": "INFO",
                 "title_ar": f"ملف اختبار غير معروف: '{profile_id}'",
+                "title_en": f"Unknown Profile '{profile_id}'",
                 "detail_ar": f"تم استخدام ملف خط التغذية 5.0V VCC القياسي تلقائياً لعدم تطابق اسم الملف.",
                 "detail_en": f"Unknown profile ID '{profile_id}', defaulted to 5.0V VCC benchmark."
+            })
+
+        # Surface any field the driver had to clamp, so a reading is never
+        # silently trusted when the instrument itself reported overflow.
+        overflow_fields = m.get("overflow") or []
+        if overflow_fields:
+            voltage_overflow = any(str(f).startswith("v_") for f in overflow_fields)
+            findings.insert(0, {
+                # A clamped voltage invalidates the DC verdict itself, so it is a
+                # warning; a clamped timing field is informational only.
+                "level": "WARNING" if voltage_overflow else "INFO",
+                "title_ar": "قراءات خارج مدى الجهاز (Overflow)",
+                "title_en": "Instrument Overflow On Some Fields",
+                "detail_ar": "الحقول التالية تجاوزت مدى القياس وتم قصرها عند الحد الأقصى، ولا يُعتمد عليها في هذا التشخيص: "
+                             + "، ".join(str(x) for x in overflow_fields) + ".",
+                "detail_en": "These fields exceeded the instrument range and were clamped; do not rely on them: "
+                             + ", ".join(str(x) for x in overflow_fields) + "."
             })
 
         # ==========================================
@@ -382,18 +434,39 @@ class AICircuitDoctor:
         has_critical = any(f["level"] == "CRITICAL" for f in findings)
         has_warning = any(f["level"] == "WARNING" for f in findings)
 
-        if has_critical or health_score < 50:
+        def _en_title(f: Dict[str, Any]) -> str:
+            """English headline for a finding, never falling back to Arabic text."""
+            title = f.get("title_en")
+            if title:
+                return title
+            detail = (f.get("detail_en") or "").strip()
+            if detail:
+                return detail.split(". ")[0].strip().rstrip(".")
+            return f.get("level", "Finding").title()
+
+        if has_critical:
             severity = "CRITICAL"
-            # Title derived from the first critical finding
-            crit_f = next((f for f in findings if f["level"] == "CRITICAL"), findings[0])
+            # Headline taken from the first critical finding
+            crit_f = next(f for f in findings if f["level"] == "CRITICAL")
             status_title_ar = f"عطل حرج: {crit_f['title_ar']}"
-            status_title_en = f"Critical Fault: {crit_f['detail_en']}"
+            status_title_en = f"Critical Fault: {_en_title(crit_f)}"
+        elif has_warning and health_score < 50:
+            # No single fault is critical, but the accumulated defects are.
+            # Do NOT label this "عطل حرج: انخفاض طفيف" - that contradicts itself.
+            severity = "CRITICAL"
+            warn_f = next(f for f in findings if f["level"] == "WARNING")
+            status_title_ar = f"تدهور مركّب في النقطة (عدة عيوب مجتمعة): {warn_f['title_ar']}"
+            status_title_en = f"Compound Degradation (multiple defects): {_en_title(warn_f)}"
         elif has_warning or health_score < 85:
             severity = "WARNING"
-            # Title derived from the first warning finding
-            warn_f = next((f for f in findings if f["level"] == "WARNING"), findings[0])
-            status_title_ar = f"تنبيه: {warn_f['title_ar']}"
-            status_title_en = f"Warning: {warn_f['title_ar']}"
+            # Headline taken from the first warning finding, if any
+            warn_f = next((f for f in findings if f["level"] == "WARNING"), findings[0] if findings else None)
+            if warn_f:
+                status_title_ar = f"تنبيه: {warn_f['title_ar']}"
+                status_title_en = f"Warning: {_en_title(warn_f)}"
+            else:
+                status_title_ar = "تنبيه: النقطة خارج الحالة المثالية"
+                status_title_en = "Warning: measurement point is outside its ideal window"
         else:
             severity = "NORMAL"
             status_title_ar = "النقطة سليمة وتعمل ضمن المعايير القياسية"

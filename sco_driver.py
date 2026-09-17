@@ -119,6 +119,7 @@ class SCODriver:
             "duty_neg_pct": 0.0,
             "pw_pos_us": 0.0,
             "pw_neg_us": 0.0,
+            "overflow": [],
             "timestamp": time.time(),
             "formatted_time": time.strftime("%H:%M:%S")
         }
@@ -128,8 +129,15 @@ class SCODriver:
             if self.ser and self.ser.is_open:
                 return True
             try:
-                # If current port doesn't exist, re-scan
-                if not self.port or not os.path.exists(self.port) if not sys.platform == "win32" else False:
+                # If the current port no longer exists, re-scan.
+                # (POSIX only: on Windows a COM name is not a filesystem path.)
+                needs_rescan = False
+                if sys.platform != "win32":
+                    needs_rescan = (not self.port) or (not os.path.exists(self.port))
+                elif not self.port:
+                    needs_rescan = True
+
+                if needs_rescan:
                     detected = find_scope_port()
                     if detected:
                         self.port = detected
@@ -256,9 +264,27 @@ class SCODriver:
             payload = data[3:51]
             raw = struct.unpack('<12I', payload)
 
-            # Heuristic Sanity Check 2: Duty cycle <= 100.0% (raw <= 1000)
-            if raw[8] > 1000 or raw[9] > 1000:
-                return None
+            # Out-of-range field handling.
+            # The firmware has explicit per-field overflow states (Max/Min/Ave/Rms/
+            # Vpp/VP/Cyc/+PW/-PW/Fr all have an "overflow" display string), so an
+            # implausible field is an expected instrument state, NOT a corrupt frame.
+            # Discarding the packet here would make a perfectly healthy device look
+            # disconnected after 5 such reads. Clamp the field and report the flag.
+            overflow: List[str] = []
+            raw = list(raw)
+
+            for idx, name in ((8, "duty_pos"), (9, "duty_neg")):
+                if raw[idx] > 1000:  # > 100.0 %
+                    overflow.append(name)
+                    raw[idx] = 1000
+
+            # Instrument measuring range is +/-400V (Vpp 800V) per the manual.
+            for idx, name in ((0, "v_max"), (1, "v_min"), (2, "v_ave"),
+                              (3, "v_pp"), (4, "v_peak"), (5, "v_rms")):
+                limit = 800_000_000 if idx == 3 else 400_000_000
+                if raw[idx] > limit:
+                    overflow.append(name)
+                    raw[idx] = limit
 
             def parse_v(val: int, sign: int) -> float:
                 v = -val if sign == 1 else val
@@ -296,6 +322,7 @@ class SCODriver:
                 "duty_neg_pct": duty_neg,
                 "pw_pos_us": pw_pos_us,
                 "pw_neg_us": pw_neg_us,
+                "overflow": overflow,
                 "timestamp": now,
                 "formatted_time": time.strftime("%H:%M:%S", time.localtime(now))
             }
@@ -303,6 +330,14 @@ class SCODriver:
             with self._state_lock:
                 self.last_error = str(e)
             return None
+
+    def read_once(self) -> Optional[Dict[str, Any]]:
+        """
+        Public single-shot acquisition, safe to call while the worker is running.
+        Intended for CLI tools and tests so they never touch private members.
+        """
+        with self._serial_lock:
+            return self._query_device_serial()
 
     def _worker_loop(self):
         """Background acquisition loop."""
