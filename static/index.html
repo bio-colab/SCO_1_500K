@@ -462,7 +462,8 @@
         }
       } else {
         connDot.className = 'w-2.5 h-2.5 rounded-full bg-emerald-400 pulse-green';
-        connText.innerText = 'متصل: ' + (d.port || 'COM') + ' (9600)';
+        const baudStr = d.baudrate ? d.baudrate + (d.baudrate > 9600 ? ' Turbo' : '') : '115200 Turbo';
+        connText.innerText = 'متصل: ' + (d.port || 'COM') + ' (' + baudStr + ')';
         connText.className = 'font-mono text-xs text-emerald-400 font-bold';
         if (sigState) {
           sigState.innerText = (d.v_pp > 0.04) ? 'إشارة نشطة / تموج' : 'جهد مستقر';

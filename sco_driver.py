@@ -82,7 +82,7 @@ def find_scope_port(preferred: Optional[str] = None) -> Optional[str]:
 
 
 class SCODriver:
-    def __init__(self, port: Optional[str] = None, baudrate: int = 9600, history_len: int = 120):
+    def __init__(self, port: Optional[str] = None, baudrate: int = 115200, history_len: int = 120):
         self.port = find_scope_port(port) or (port if port else ("COM3" if sys.platform == "win32" else "/dev/ttyUSB0"))
         self.baudrate = baudrate
         self.ser: Optional[serial.Serial] = None
@@ -375,9 +375,12 @@ class SCODriver:
                     with self._state_lock:
                         self.connected = False
                     self.close_port()
+                    # Auto-negotiate baud rate between 115200 and 9600
+                    self.baudrate = 9600 if self.baudrate == 115200 else 115200
+                    consecutive_failures = 0
                     time.sleep(0.5)
 
-            time.sleep(0.12)
+            time.sleep(0.04 if self.baudrate == 115200 else 0.10)
 
     def start(self):
         if self.running:
@@ -406,6 +409,7 @@ class SCODriver:
             m["connected"] = self.connected
             m["is_frozen"] = self.is_frozen
             m["port"] = self.port
+            m["baudrate"] = self.baudrate
             return m
 
     def get_history(self) -> List[Dict[str, Any]]:
