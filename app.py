@@ -3,11 +3,11 @@ SCO_1_500K Smart AI Workstation Server
 Author: Antigravity Engineering
 --------------------------------------
 FastAPI application providing:
-- Real-time WebSocket streaming of oscilloscope telemetry
-- Hardware control endpoints (AUTO SET, Freeze, Diagnostics)
-- AI Circuit Doctor integration
+- Real-time WebSocket streaming of oscilloscope telemetry (non-blocking)
+- Thread-safe hardware control endpoints (AUTO SET, Freeze, Diagnostics)
+- AI Circuit Doctor integration with Pydantic validation
 - CSV history export
-- Static web interface hosting
+- Cross-platform dynamic port auto-discovery
 """
 
 import os
@@ -19,20 +19,21 @@ import asyncio
 from typing import Dict, Any, Optional
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Response
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-from sco_driver import SCODriver
+from sco_driver import SCODriver, find_scope_port
 from ai_engine import AICircuitDoctor
 
-# Global Oscilloscope Driver instance
-driver = SCODriver(port="COM3", baudrate=9600, history_len=200)
+# Global Oscilloscope Driver instance with auto-discovered or env port
+initial_port = find_scope_port()
+driver = SCODriver(port=initial_port, baudrate=9600, history_len=200)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    print("[SERVER] Starting SCO_1_500K Hardware Telemetry Worker...")
+    print(f"[SERVER] Starting SCO_1_500K Hardware Worker on port: {driver.port} ...")
     driver.start()
     yield
     print("[SERVER] Stopping SCO_1_500K Hardware Driver...")
@@ -40,10 +41,18 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="SCO_1_500K AI Lab Workstation", lifespan=lifespan)
 
-# Pydantic models for REST requests
+# Pydantic models for validated REST requests (Issue 6 fix)
+class CustomParams(BaseModel):
+    expected_v: float = Field(default=5.0, gt=0, le=500.0, description="Expected DC voltage in Volts")
+    tolerance_pct: float = Field(default=5.0, gt=0, le=100.0, description="Allowed tolerance percentage")
+    max_ripple_v: float = Field(default=0.1, ge=0, le=50.0, description="Maximum allowed ripple in Volts")
+
 class DiagnoseRequest(BaseModel):
     profile_id: str
-    custom_params: Optional[Dict[str, Any]] = None
+    custom_params: Optional[CustomParams] = None
+
+class PortSwitchRequest(BaseModel):
+    port: str
 
 # 1. ROOT & STATIC ASSETS
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
@@ -70,10 +79,10 @@ async def get_status():
         "last_update": m.get("formatted_time", "")
     }
 
-# 3. REMOTE AUTO CALIBRATION
+# 3. REMOTE AUTO CALIBRATION (Issue 4 fix: offloaded to thread)
 @app.post("/api/auto")
 async def trigger_auto():
-    success = driver.trigger_auto()
+    success = await asyncio.to_thread(driver.trigger_auto)
     return {"status": "ok" if success else "error"}
 
 # 4. TOGGLE FREEZE / HOLD
@@ -82,19 +91,31 @@ async def toggle_freeze():
     frozen = driver.toggle_freeze()
     return {"is_frozen": frozen}
 
-# 5. CIRCUIT BENCHMARK PROFILES
+# 5. CHANGE OR RE-DETECT PORT DYNAMICALLY
+@app.post("/api/set_port")
+async def set_port(req: PortSwitchRequest):
+    new_port = req.port.strip()
+    if new_port:
+        driver.stop()
+        driver.port = new_port
+        driver.start()
+        return {"status": "ok", "port": driver.port}
+    return {"status": "error", "message": "Invalid port name"}
+
+# 6. CIRCUIT BENCHMARK PROFILES
 @app.get("/api/profiles")
 async def get_profiles():
     return AICircuitDoctor.get_profiles()
 
-# 6. AI CIRCUIT DIAGNOSIS ENDPOINT
+# 7. AI CIRCUIT DIAGNOSIS ENDPOINT (Validated via Pydantic)
 @app.post("/api/diagnose")
 async def run_diagnose(req: DiagnoseRequest):
     metrics = driver.get_current_metrics()
-    report = AICircuitDoctor.diagnose_point(req.profile_id, metrics, req.custom_params)
+    custom_dict = req.custom_params.model_dump() if req.custom_params else None
+    report = AICircuitDoctor.diagnose_point(req.profile_id, metrics, custom_dict)
     return report
 
-# 7. EXPORT DATA TO CSV
+# 8. EXPORT DATA TO CSV
 @app.get("/api/export")
 async def export_csv():
     history = driver.get_history()
@@ -117,24 +138,26 @@ async def export_csv():
         headers={"Content-Disposition": "attachment; filename=sco_oscilloscope_telemetry.csv"}
     )
 
-# 8. WEBSOCKET REAL-TIME TELEMETRY STREAM
+# 9. WEBSOCKET REAL-TIME TELEMETRY STREAM (10 Hz, non-blocking)
 @app.websocket("/ws/telemetry")
 async def ws_telemetry(websocket: WebSocket):
     await websocket.accept()
     try:
         while True:
+            # Instantaneous fetch (<1 microsecond) without holding serial lock
             metrics = driver.get_current_metrics()
             payload = {
                 "type": "telemetry",
                 "data": metrics
             }
             await websocket.send_text(json.dumps(payload))
-            await asyncio.sleep(0.1)  # 10 Hz stream to frontend
+            await asyncio.sleep(0.1)  # 10 FPS stream to frontend
     except (WebSocketDisconnect, asyncio.CancelledError):
         pass
     except Exception as e:
-        print(f"[WS ERROR] {e}")
+        pass
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("app:app", host="127.0.0.1", port=8765, reload=False)
+    port = int(os.environ.get("PORT", 8765))
+    uvicorn.run("app:app", host="127.0.0.1", port=port, reload=False)

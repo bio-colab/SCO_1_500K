@@ -91,7 +91,10 @@
 
       <div class="hidden sm:flex items-center gap-2 px-3 py-1.5 rounded-lg bg-slate-900/80 border border-slate-800 font-mono text-xs text-slate-400">
         <span class="text-slate-500">منفذ:</span>
-        <span id="portDisplay" class="text-emerald-400">COM3</span>
+        <button onclick="changePortPrompt()" class="text-emerald-400 hover:text-emerald-300 transition flex items-center gap-1 cursor-pointer" title="انقر لتغيير أو اختيار منفذ السيريال يدوياً">
+          <span id="portDisplay">COM3</span>
+          <span class="text-[10px] text-slate-500 hover:text-white">✏️</span>
+        </button>
         <span class="text-slate-600">|</span>
         <span id="fpsDisplay" class="text-slate-300">0 FPS</span>
       </div>
@@ -137,8 +140,17 @@
           </div>
         </div>
 
+        <!-- PERMANENT RECONSTRUCTED BADGE (ISSUE 3 FIX) -->
+        <div class="bg-amber-950/40 border border-amber-500/40 text-amber-300 px-3 py-1.5 rounded-lg text-xs font-mono flex items-center justify-between shadow-sm">
+          <div class="flex items-center gap-2">
+            <span class="text-amber-400 font-bold">⚠️ RECONSTRUCTED SYNTHESIS</span>
+            <span class="text-slate-400 text-[11px]">— NOT RAW ADC SAMPLES</span>
+          </div>
+          <span class="text-amber-200/80 font-sans text-[11px]">محاكاة تركيبية مبنية على المعاملات (وليست عينات ADC خام)</span>
+        </div>
+
         <!-- CANVAS WRAPPER -->
-        <div class="scope-screen rounded-xl overflow-hidden border border-emerald-900/50 aspect-[16/9] w-full flex items-center justify-center">
+        <div class="scope-screen rounded-xl overflow-hidden border border-emerald-900/50 aspect-[16/9] w-full flex items-center justify-center relative">
           <canvas id="scopeCanvas" width="800" height="450" class="w-full h-full block"></canvas>
         </div>
 
@@ -425,6 +437,10 @@
     function updateDashboard(d) {
       if (!d) return;
 
+      if (d.port) {
+        document.getElementById('portDisplay').innerText = d.port;
+      }
+
       // Voltages
       document.getElementById('valVmax').innerHTML = `${d.v_max.toFixed(3)} <span class="text-xs text-slate-500 font-sans">V</span>`;
       document.getElementById('valVmaxMv').innerText = `${(d.v_max * 1000).toFixed(1)} mV`;
@@ -534,21 +550,36 @@
         const freq = latestData.frequency_hz || 0;
         const duty = (latestData.duty_pos_pct || 50) / 100.0;
 
+        // Permanent On-Screen Reconstructed Watermark (Issue 3 Fix)
+        ctx.save();
+        ctx.fillStyle = 'rgba(245, 158, 11, 0.85)';
+        ctx.font = 'bold 11px "JetBrains Mono", monospace';
+        ctx.fillText('⚠️ RECONSTRUCTED TRACE — NOT RAW ADC SAMPLES', 14, 22);
+        ctx.restore();
+
         animPhase += (freq > 0 ? 0.08 : 0.01);
 
         ctx.save();
-        ctx.strokeStyle = '#10b981';
-        ctx.shadowColor = '#00f5d4';
-        ctx.shadowBlur = 8;
-        ctx.lineWidth = 2.2;
-        ctx.beginPath();
-
         // Calculate vertical scale mapping
         // Baseline midY is 0V, each cell dy = 1V or adaptive
         const voltSpan = Math.max(vmax - vmin, vpp, 1.0);
         const scaleY = (dy * 2.5) / voltSpan;
 
         const isAC = (freq > 50 && vpp > 0.08);
+
+        // Draw DC Ripple Tolerance Band if DC rail with noticeable ripple
+        if (!isAC && vpp > 0.05) {
+          ctx.fillStyle = 'rgba(245, 158, 11, 0.10)';
+          const bandTop = midY - ((vave + vpp / 2) * (scaleY * 0.4));
+          const bandBottom = midY - ((vave - vpp / 2) * (scaleY * 0.4));
+          ctx.fillRect(0, Math.min(bandTop, bandBottom), w, Math.abs(bandBottom - bandTop));
+        }
+
+        ctx.strokeStyle = '#10b981';
+        ctx.shadowColor = '#00f5d4';
+        ctx.shadowBlur = 8;
+        ctx.lineWidth = 2.2;
+        ctx.beginPath();
 
         for (let x = 0; x < w; x++) {
           const t = (x / w) * Math.PI * 8 + animPhase;
@@ -557,19 +588,14 @@
           if (isAC) {
             // Reconstruct periodic signal based on duty cycle
             const cyclePos = (t % (2 * Math.PI)) / (2 * Math.PI);
-            let waveVal = 0;
-            if (cyclePos < duty) {
-              waveVal = 1.0;
-            } else {
-              waveVal = -1.0;
-            }
-            // Add slight harmonic smoothing and measured ripple
+            let waveVal = (cyclePos < duty) ? 1.0 : -1.0;
+            // Add harmonic smoothing
             waveVal = waveVal * 0.85 + Math.sin(t) * 0.15;
-            yVal = (latestData.v_ave || (vmax + vmin)/2) + waveVal * (vpp / 2);
+            yVal = vave + waveVal * (vpp / 2);
           } else {
-            // DC Rail with slight analog micro-noise matching vpp
-            const noise = (Math.random() - 0.5) * Math.max(vpp, 0.008);
-            yVal = vmax + noise;
+            // Deterministic measured ripple instead of deceptive Math.random() noise
+            const rippleSine = (vpp > 0.005) ? Math.sin(t * 2) * (vpp / 2) : 0;
+            yVal = vave + rippleSine;
           }
 
           const canvasY = midY - (yVal * (scaleY * 0.4));
@@ -815,8 +841,26 @@
       }
     }
 
-    function exportCSV() {
-      window.location.href = '/api/export';
+    function changePortPrompt() {
+      const current = document.getElementById('portDisplay').innerText;
+      const newPort = prompt('أدخل اسم أو مسار منفذ السيريال (مثال: COM4 على ويندوز، أو /dev/ttyUSB0 على لينكس):', current);
+      if (newPort && newPort.trim() && newPort.trim() !== current) {
+        showToast('جاري التبديل للمنفذ ' + newPort.trim() + '...', 'info');
+        fetch('/api/set_port', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({port: newPort.trim()})
+        }).then(r => r.json()).then(data => {
+          if (data.status === 'ok') {
+            document.getElementById('portDisplay').innerText = data.port;
+            showToast('تم ضبط المنفذ بنجاح: ' + data.port, 'success');
+          } else {
+            showToast('تعذر ضبط المنفذ: ' + (data.message || 'خطأ'), 'error');
+          }
+        }).catch(err => {
+          showToast('فشل الاتصال بالخادم لضبط المنفذ', 'error');
+        });
+      }
     }
 
     // TOAST NOTIFICATION HELPER

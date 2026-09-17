@@ -98,29 +98,51 @@ class AICircuitDoctor:
     def diagnose_point(profile_id: str, m: Dict[str, Any], custom_params: Dict[str, Any] = None) -> Dict[str, Any]:
         """Runs thorough engineering rule-based and heuristics diagnostics on the measurements."""
         profile = dict(CIRCUIT_PROFILES.get(profile_id, CIRCUIT_PROFILES["5V_RAIL"]))
+        
+        # Safe handling of custom parameters (Issue 6 fix)
         if profile_id == "CUSTOM" and custom_params:
-            profile["expected_v"] = float(custom_params.get("expected_v", 5.0))
-            profile["tolerance_pct"] = float(custom_params.get("tolerance_pct", 5.0))
-            profile["max_ripple_v"] = float(custom_params.get("max_ripple_v", 0.1))
+            try:
+                ev = float(custom_params.get("expected_v", 5.0))
+                profile["expected_v"] = ev if ev > 0 else 5.0
+            except (ValueError, TypeError):
+                profile["expected_v"] = 5.0
 
-        vmax = float(m.get("v_max", 0.0))
-        vmin = float(m.get("v_min", 0.0))
-        vave = float(m.get("v_ave", 0.0))
-        vpp  = float(m.get("v_pp", 0.0))
-        vrms = float(m.get("v_rms", 0.0))
-        freq = float(m.get("frequency_hz", 0.0))
-        period = float(m.get("period_us", 0.0))
-        duty_pos = float(m.get("duty_pos_pct", 0.0))
+            try:
+                tol = float(custom_params.get("tolerance_pct", 5.0))
+                profile["tolerance_pct"] = tol if 0 < tol <= 100 else 5.0
+            except (ValueError, TypeError):
+                profile["tolerance_pct"] = 5.0
+
+            try:
+                rip = float(custom_params.get("max_ripple_v", 0.1))
+                profile["max_ripple_v"] = rip if rip >= 0 else 0.1
+            except (ValueError, TypeError):
+                profile["max_ripple_v"] = 0.1
+
+        # Safe telemetry values
+        def safe_float(val, default=0.0):
+            try:
+                return float(val)
+            except (ValueError, TypeError):
+                return default
+
+        vmax = safe_float(m.get("v_max", 0.0))
+        vmin = safe_float(m.get("v_min", 0.0))
+        vave = safe_float(m.get("v_ave", 0.0))
+        vpp  = safe_float(m.get("v_pp", 0.0))
+        vrms = safe_float(m.get("v_rms", 0.0))
+        freq = safe_float(m.get("frequency_hz", 0.0))
+        period = safe_float(m.get("period_us", 0.0))
+        duty_pos = safe_float(m.get("duty_pos_pct", 0.0))
 
         health_score = 100
-        severity = "NORMAL"  # NORMAL, WARNING, CRITICAL
         findings = []
         recommendations = []
-        status_title_ar = "النقطة سليمة وتعمل ضمن المعايير القياسية"
-        status_title_en = "Circuit rail is operating nominally within specs"
-
         p_type = profile.get("type", "DC")
 
+        # ==========================================
+        # 1. DC POWER RAIL ANALYSIS (Issue 2 Fix)
+        # ==========================================
         if p_type == "DC":
             exp_v = profile["expected_v"]
             tol_pct = profile["tolerance_pct"]
@@ -128,145 +150,148 @@ class AICircuitDoctor:
             min_allowed = exp_v * (1.0 - tol_pct / 100.0)
             max_allowed = exp_v * (1.0 + tol_pct / 100.0)
 
-            # 1. Dead Rail / Short Check
-            if vmax < 0.25 and vave < 0.25:
+            # A. Dead Rail Check (0V)
+            # Evaluate using vave and vmax together
+            if vave < 0.25 and vmax < 0.35:
                 health_score = 0
-                severity = "CRITICAL"
-                status_title_ar = "خط التغذية ميت تماماً (0V) - شورت أو دائرة مفتوحة!"
-                status_title_en = "Power rail is completely DEAD (0V) - Dead Short or Open Circuit!"
                 findings.append({
                     "level": "CRITICAL",
-                    "title_ar": "غياب تام للجهد (Dead Rail)",
-                    "detail_ar": f"الجهد المقاس {vmax:.3f}V بينما المتوقع {exp_v:.2f}V. الخط لا يصله أي جهد إطلاقاً.",
-                    "detail_en": f"Measured voltage {vmax:.3f}V while expecting {exp_v:.2f}V. Rail has 0V power."
+                    "title_ar": "غياب تام للجهد (Dead Rail / 0V)",
+                    "detail_ar": f"متوسط الجهد المقاس {vave:.3f}V بينما المتوقع {exp_v:.2f}V. خط التغذية مفصول أو به قصر صريح (Short to GND).",
+                    "detail_en": f"Measured average voltage is {vave:.3f}V vs nominal {exp_v:.2f}V. Power rail is dead."
                 })
                 recommendations.append({
                     "step_ar": "افصل التغذية فوراً وافحص المقاومة بين هذا الخط والأرضي (GND) بوضع الجرس/الدايود في الملتيميتر.",
                     "step_en": "Cut power and measure resistance from this rail to GND in diode/continuity mode."
                 })
                 recommendations.append({
-                    "step_ar": "إذا رن الجرس (قريب من 0 أوم)، فهناك مكثف سيراميكي تالف (Shorted MLCC) أو آيسي محترق متصل بالخط.",
-                    "step_en": "If it beeps (< 5 ohms), inspect ceramic filter capacitors (MLCC) or shorted ICs on this rail."
+                    "step_ar": "إذا رن الجرس (أقل من 5 أوم)، افحص المكثفات السيراميكية (MLCC) أو الشرائح المتصلة بالخط.",
+                    "step_en": "If continuity beeps (< 5 ohms), inspect ceramic decoupling capacitors or shorted ICs."
                 })
                 recommendations.append({
-                    "step_ar": "إذا لم يكن هناك شورت، افحص فيوز الحماية (Fuse) أو منظم الجهد (Regulator) أو مفتاح التمكين (Enable Pin).",
+                    "step_ar": "إذا لم يوجد قصر، افحص فيوز الحماية أو منظم الجهد أو طرف التمكين (Enable).",
                     "step_en": "If no short, verify input fuse, upstream regulator enable pin, or broken trace."
                 })
 
-            # 2. Severe Voltage Sag
-            elif vmax < min_allowed * 0.85:
-                health_score = max(10, health_score - 60)
-                severity = "CRITICAL"
-                status_title_ar = "هبوط حاد في الجهد (Severe Voltage Sag)"
-                status_title_en = "Severe Voltage Sag Detected"
+            # B. Severe Voltage Sag (vave dropped by >=10% or severely below tolerance)
+            elif vave < min_allowed * 0.92 or ((exp_v - vave) / exp_v) >= 0.10:
+                drop_pct = ((exp_v - vave) / exp_v) * 100.0
+                health_score = max(10, health_score - 65)
                 findings.append({
                     "level": "CRITICAL",
-                    "title_ar": "هبوط حاد جداً في الفولت",
-                    "detail_ar": f"الجهد المقاس {vmax:.3f}V أقل بكثير من الحد الأدنى المسموح ({min_allowed:.2f}V).",
-                    "detail_en": f"Voltage {vmax:.3f}V is severely below safe minimum threshold ({min_allowed:.2f}V)."
+                    "title_ar": f"هبوط حاد في الجهد بنسبة {drop_pct:.1f}% (Severe Voltage Sag)",
+                    "detail_ar": f"متوسط الجهد {vave:.3f}V منهار تحت الحد الأدنى الآمن ({min_allowed:.2f}V). الخط يعاني من سحب تيار مفرط أو عجز في المنظم.",
+                    "detail_en": f"Average DC voltage {vave:.3f}V is severely below minimum {min_allowed:.2f}V (-{drop_pct:.1f}% drop)."
                 })
                 recommendations.append({
-                    "step_ar": "تحقق من حرارة العناصر على هذا الخط بالكاميرا الحرارية أو اللمس؛ قد يكون هناك سحب تيار مفرط (Overload).",
-                    "step_en": "Check component temperatures on this rail; excessive thermal output indicates overloaded regulator."
+                    "step_ar": "تحقق من حرارة العناصر على هذا الخط باللمس أو الكاميرا الحرارية لرصد السحب الزائد (Overload).",
+                    "step_en": "Check component temperatures on this rail; excessive heat indicates heavy overload."
                 })
                 recommendations.append({
                     "step_ar": "افحص ملف الخرج (Inductor) ومكثفات التغذية لمنظم الخفض (Buck Converter).",
-                    "step_en": "Inspect buck converter switching inductor and output filtering stage."
+                    "step_en": "Inspect buck converter switching inductor and filtering stage."
                 })
 
-            # 3. Moderate Sag
-            elif vmax < min_allowed:
-                health_score = max(50, health_score - 30)
-                severity = "WARNING"
-                status_title_ar = "انخفاض طفيف في الجهد تحت الحدود المسموحة"
-                status_title_en = "Marginal Voltage Drop Detected"
+            # C. Moderate Voltage Sag
+            elif vave < min_allowed:
+                drop_pct = ((exp_v - vave) / exp_v) * 100.0
+                health_score = max(45, health_score - 35)
                 findings.append({
                     "level": "WARNING",
-                    "title_ar": "انخفاض الجهد عن المعدل الطبيعي",
-                    "detail_ar": f"الجهد المقاس {vmax:.3f}V (المتوقع {exp_v:.2f}V ±{tol_pct}%).",
-                    "detail_en": f"Voltage {vmax:.3f}V is below nominal range {min_allowed:.2f}V - {max_allowed:.2f}V."
+                    "title_ar": f"انخفاض طفيف في الجهد بنسبة {drop_pct:.1f}% (Voltage Sag)",
+                    "detail_ar": f"متوسط الجهد {vave:.3f}V أقل من نافذة التسامح ({min_allowed:.2f}V - {max_allowed:.2f}V).",
+                    "detail_en": f"Average voltage {vave:.3f}V is below nominal lower bound {min_allowed:.2f}V."
                 })
                 recommendations.append({
-                    "step_ar": "تأكد من سلامة مقاومة مسار التغذية الراجعة (Feedback Resistors) للمنظم.",
+                    "step_ar": "تأكد من سلامة مقاومات مجزئ التغذية الراجعة (Feedback Resistors) لمنظم الجهد.",
                     "step_en": "Check feedback voltage divider network resistors around the voltage regulator."
                 })
 
-            # 4. Dangerous Overvoltage
-            elif vmax > max_allowed:
-                health_score = max(15, health_score - 70)
-                severity = "CRITICAL"
-                status_title_ar = "جهد زائد خطر (Over-Voltage Alert) - خطر احتراق الشرائح!"
-                status_title_en = "Dangerous Overvoltage - High Risk of IC Destruction!"
+            # D. DC Over-Voltage (vave above upper tolerance)
+            elif vave > max_allowed:
+                over_pct = ((vave - exp_v) / exp_v) * 100.0
+                health_score = max(10, health_score - 70)
                 findings.append({
                     "level": "CRITICAL",
-                    "title_ar": "ارتفاع خطر في الفولت",
-                    "detail_ar": f"الجهد المقاس {vmax:.3f}V تجاوز الحد الأقصى الآمن ({max_allowed:.2f}V).",
-                    "detail_en": f"Voltage {vmax:.3f}V exceeds safety upper limit ({max_allowed:.2f}V)."
+                    "title_ar": f"ارتفاع خطر في الجهد المستمر بنسبة +{over_pct:.1f}% (DC Over-Voltage)",
+                    "detail_ar": f"متوسط الجهد {vave:.3f}V يتجاوز الحد الأقصى ({max_allowed:.2f}V). خطر احتراق الدوائر المتكاملة والأنوية!",
+                    "detail_en": f"Average voltage {vave:.3f}V exceeds maximum safety threshold ({max_allowed:.2f}V)."
                 })
                 recommendations.append({
-                    "step_ar": "افصل الجهاز فوراً! منظم الجهد به عطل في حلقة التغذية أو شورت بين الدخل والخرج (Mosfet Punch-through).",
+                    "step_ar": "افصل التغذية فوراً! منظم الجهد به عطل في حلقة التغذية أو قصر بين الدخل والخرج (Mosfet Short).",
                     "step_en": "Power down immediately! Regulator high-side MOSFET may have punched through."
                 })
 
-            # 5. Ripple & Noise Check (Bad ESR Capacitors)
+            # E. Ripple & Noise Evaluation (vpp evaluated independently of vave)
             if vpp > max_ripple * 2.5:
-                health_score = max(20, health_score - 45)
-                if severity == "NORMAL":
-                    severity = "WARNING"
+                health_score = max(15, health_score - 45)
                 findings.append({
                     "level": "WARNING",
-                    "title_ar": "تموج وضوضاء كهربائية خطيرة (High Ripple)",
-                    "detail_ar": f"قيمة التموج المقاسة {vpp*1000:.1f} mVpp أعلى بكثير من الحد الأقصى المقبول ({max_ripple*1000:.1f} mVpp).",
-                    "detail_en": f"Ripple noise {vpp*1000:.1f} mVpp greatly exceeds maximum threshold ({max_ripple*1000:.1f} mVpp)."
+                    "title_ar": f"تموج وضوضاء كهربائية خطيرة ({vpp*1000:.1f} mVpp)",
+                    "detail_ar": f"التموج المقاس {vpp*1000:.1f} mVpp يتجاوز الحد الأقصى المسموح ({max_ripple*1000:.1f} mVpp) بأكثر من 250%!",
+                    "detail_en": f"Ripple noise {vpp*1000:.1f} mVpp severely exceeds max tolerance ({max_ripple*1000:.1f} mVpp)."
                 })
                 recommendations.append({
-                    "step_ar": "احتمال كبير جداً لتلف أو جفاف مكثفات التنعيم (Electrolytic / Polymer Capacitors) وارتفاع مقاومتها الداخلية (Bad ESR).",
-                    "step_en": "High probability of dried-out filter capacitors with degraded ESR. Replace bulk capacitors."
+                    "step_ar": "احتمال مؤكد لجفاف أو تلف مكثفات التنعيم (Bad ESR Filter Capacitors) وفقدان سعتها التخزينية.",
+                    "step_en": "High probability of degraded filter capacitors with high ESR. Replace bulk output capacitors."
                 })
                 recommendations.append({
-                    "step_ar": "قم باستبدال مكثف التنعيم الملاصق لمنظم الجهد بآخر جديد منخفض الـ ESR (Low-ESR).",
+                    "step_ar": "استبدل مكثف الخرج بآخر جديد من نوع منخفض المقاومة الداخلية (Low-ESR).",
                     "step_en": "Replace the output reservoir capacitor with a high-grade low-ESR unit."
                 })
             elif vpp > max_ripple:
-                health_score = max(60, health_score - 20)
-                if severity == "NORMAL":
-                    severity = "WARNING"
+                health_score = max(55, health_score - 20)
                 findings.append({
-                    "level": "INFO",
-                    "title_ar": "تموج تشويش خفيف في الخط",
-                    "detail_ar": f"التموج المقاس {vpp*1000:.1f} mVpp أعلى بقليل من المعيار المثالي ({max_ripple*1000:.1f} mVpp).",
-                    "detail_en": f"Ripple {vpp*1000:.1f} mVpp is slightly elevated."
+                    "level": "WARNING",
+                    "title_ar": f"تموج تشويش مرتفع ({vpp*1000:.1f} mVpp)",
+                    "detail_ar": f"التموج المقاس {vpp*1000:.1f} mVpp أعلى من المعيار المثالي ({max_ripple*1000:.1f} mVpp).",
+                    "detail_en": f"Ripple {vpp*1000:.1f} mVpp is elevated above threshold ({max_ripple*1000:.1f} mVpp)."
                 })
                 recommendations.append({
-                    "step_ar": "أضف مكثف سيراميكي سعة 100nF بجانب آيسي الحمل لامتصاص الضوضاء عالية التردد.",
-                    "step_en": "Add 100nF ceramic decoupling capacitor adjacent to load ICs."
+                    "step_ar": "أضف مكثف سيراميكي سعة 100nF بجانب أطراف تغذية الشريحة لامتصاص الترددات العالية.",
+                    "step_en": "Add 100nF ceramic decoupling capacitor adjacent to IC power pins."
                 })
 
-            # If all passed
+            # F. Transient Overshoot Check (vmax vs DC nominal)
+            # If vave is nominal, but vmax spikes: note as transient overshoot rather than fatal DC fault
+            if min_allowed <= vave <= max_allowed and vmax > max_allowed * 1.2:
+                health_score = max(60, health_score - 15)
+                findings.append({
+                    "level": "INFO",
+                    "title_ar": f"رصد طفرات جهد عابرة (Overshoot Spikes: {vmax:.2f}V)",
+                    "detail_ar": f"متوسط الجهد مستقر ({vave:.2f}V) ولكن توجد قمم عابرة تصل إلى {vmax:.2f}V ناجمة عن رنين التبديل أو المحاثة.",
+                    "detail_en": f"Average voltage is stable ({vave:.2f}V) but transient spikes reach {vmax:.2f}V (switching overshoot)."
+                })
+                recommendations.append({
+                    "step_ar": "تحقق من شبكة الإخماد (Snubber Network) أو دايود الفريبوتش لمنع الرنين العابر.",
+                    "step_en": "Inspect snubber network or freewheeling diode to damp transient ringing."
+                })
+
+            # G. Clean Nominal Rail
             if health_score >= 85 and len(findings) == 0:
                 findings.append({
                     "level": "PASS",
-                    "title_ar": "الجهد الاسمي مستقر ونظيف تماماً",
-                    "detail_ar": f"الجهد: {vmax:.3f}V ضمن التسامح المقبول (±{tol_pct}%)، والتموج {vpp*1000:.1f} mVpp في الحدود الممتازة.",
-                    "detail_en": f"Voltage {vmax:.3f}V is nominal and ripple {vpp*1000:.1f} mVpp is pristine."
+                    "title_ar": "جهد التغذية مستقر ونظيف تماماً",
+                    "detail_ar": f"متوسط الجهد: {vave:.3f}V ضمن التسامح المقبول (±{tol_pct}%)، والتموج {vpp*1000:.1f} mVpp ممتاز.",
+                    "detail_en": f"DC level {vave:.3f}V is nominal and ripple {vpp*1000:.1f} mVpp is pristine."
                 })
                 recommendations.append({
-                    "step_ar": "خط التغذية في حالة صحية مثالية ولا يحتاج لأي صيانة.",
+                    "step_ar": "خط التغذية في حالة ممتازة ولا يتطلب أي إجراء صيانة.",
                     "step_en": "Power rail is healthy. No maintenance required."
                 })
 
+        # ==========================================
+        # 2. AC CLOCK & PWM SIGNALS
+        # ==========================================
         elif p_type in ["AC_CLOCK", "PWM"]:
             min_amp = profile.get("min_amplitude_v", 0.5)
             if freq == 0 or vpp < 0.15:
                 health_score = 0
-                severity = "CRITICAL"
-                status_title_ar = "إشارة الساعة / النبضات متوقفة تماماً (Flatline / Dead Clock)!"
-                status_title_en = "Clock or PWM signal is completely flatline (0 Hz)!"
                 findings.append({
                     "level": "CRITICAL",
-                    "title_ar": "غياب التردد والنبضات",
-                    "detail_ar": "لم يتم رصد أي تردد (0 Hz) أو اتساع إشارة متناوبة.",
-                    "detail_en": "No clock oscillation or switching activity detected."
+                    "title_ar": "إشارة متوقفة تماماً (Flatline / 0 Hz)",
+                    "detail_ar": "لم يتم رصد أي تردد (0 Hz) أو نشاط نبضي. الكريستالة متوقفة أو المعالج في حالة تعليق كامل.",
+                    "detail_en": "No clock oscillation or switching activity detected (0 Hz flatline)."
                 })
                 recommendations.append({
                     "step_ar": "تأكد من وصول جهد التغذية لآيسي المولد أو الميكروكنترولر.",
@@ -294,6 +319,29 @@ class AICircuitDoctor:
                     "step_ar": "المذبذب / مشغل النبضات يعمل بكفاءة.",
                     "step_en": "Clock generator / PWM driver is operating properly."
                 })
+
+        # ==========================================
+        # 3. DERIVE SEVERITY & OVERALL TITLE (Issue 2 Fix)
+        # ==========================================
+        has_critical = any(f["level"] == "CRITICAL" for f in findings)
+        has_warning = any(f["level"] == "WARNING" for f in findings)
+
+        if has_critical or health_score < 50:
+            severity = "CRITICAL"
+            # Title derived from the first critical finding
+            crit_f = next((f for f in findings if f["level"] == "CRITICAL"), findings[0])
+            status_title_ar = f"عطل حرج: {crit_f['title_ar']}"
+            status_title_en = f"Critical Fault: {crit_f['detail_en']}"
+        elif has_warning or health_score < 85:
+            severity = "WARNING"
+            # Title derived from the first warning finding
+            warn_f = next((f for f in findings if f["level"] == "WARNING"), findings[0])
+            status_title_ar = f"تنبيه: {warn_f['title_ar']}"
+            status_title_en = f"Warning: {warn_f['title_ar']}"
+        else:
+            severity = "NORMAL"
+            status_title_ar = "النقطة سليمة وتعمل ضمن المعايير القياسية"
+            status_title_en = "Circuit rail is operating nominally within specs"
 
         return {
             "profile_id": profile["id"],

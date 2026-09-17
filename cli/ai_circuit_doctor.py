@@ -1,134 +1,95 @@
-﻿"""
-AI Circuit Doctor - Intelligent Hardware Fault Diagnosis Assistant
-------------------------------------------------------------------
-Uses the SCO_1_500K oscilloscope to diagnose circuit test points,
-detect electrical anomalies, power supply ripples, missing clocks, and shorts.
+"""
+AI Circuit Doctor - CLI Diagnostics Tool
+Author: Antigravity Engineering
+----------------------------------------
+Interactive terminal assistant that diagnoses circuits using SCO_1_500K.
+Uses the unified AICircuitDoctor engine with correct DC v_ave and v_pp analysis.
 """
 
+import os
 import sys
 import time
-import json
-from sco_oscilloscope import SCO1Oscilloscope
+import argparse
 
-CIRCUIT_BENCHMARKS = {
-    "1": {
-        "name": "5V Power Rail (VCC)",
-        "expected_v": 5.0,
-        "tolerance_pct": 5.0,
-        "max_ripple_v": 0.150,
-        "type": "DC"
-    },
-    "2": {
-        "name": "3.3V Power Rail / LDO",
-        "expected_v": 3.3,
-        "tolerance_pct": 5.0,
-        "max_ripple_v": 0.080,
-        "type": "DC"
-    },
-    "3": {
-        "name": "12V Power Rail / Automotive",
-        "expected_v": 12.0,
-        "tolerance_pct": 10.0,
-        "max_ripple_v": 0.400,
-        "type": "DC"
-    },
-    "4": {
-        "name": "Clock / PWM / Oscillator",
-        "type": "AC_SWITCHING"
-    },
-    "5": {
-        "name": "General Test Point / Custom Probe",
-        "type": "CUSTOM"
-    }
-}
+# Add parent directory to path to use unified engine and driver
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+from sco_driver import SCODriver, find_scope_port
+from ai_engine import AICircuitDoctor, CIRCUIT_PROFILES
 
-def diagnose(benchmark: dict, m: dict) -> list:
-    findings = []
-    b_type = benchmark.get("type")
-    vmax = m.get("v_max_v", 0.0)
-    vmin = m.get("v_min_v", 0.0)
-    vpp = m.get("v_pp_v", 0.0)
-    vave = m.get("v_ave_v", 0.0)
-    freq = m.get("frequency_hz", 0)
-
-    if b_type == "DC":
-        exp_v = benchmark["expected_v"]
-        tol = benchmark["tolerance_pct"]
-        max_ripple = benchmark["max_ripple_v"]
-        min_allowed = exp_v * (1.0 - tol / 100.0)
-        max_allowed = exp_v * (1.0 + tol / 100.0)
-
-        # Voltage level check
-        if vmax < 0.2 and vave < 0.2:
-            findings.append(f"[CRITICAL] Rail is DEAD (0V). Possible short-to-ground, open fuse, or disabled regulator.")
-        elif vmax < min_allowed:
-            findings.append(f"[WARNING] Voltage SAG detected: measured {vmax:.2f}V, expected {exp_v:.2f}V (under minimum {min_allowed:.2f}V). Check for heavy loading or failing regulator.")
-        elif vmax > max_allowed:
-            findings.append(f"[CRITICAL] Voltage OVER-VOLTAGE detected: measured {vmax:.2f}V, exceeds {max_allowed:.2f}V. Risk of frying ICs! Regulator feedback loop failure.")
-        else:
-            findings.append(f"[PASS] DC voltage is nominal: {vmax:.2f}V (within +/-{tol}% of {exp_v:.2f}V).")
-
-        # Ripple check
-        if vpp > max_ripple:
-            findings.append(f"[ALERT] Excessive RIPPLE detected ({vpp*1000:.1f} mVpp > {max_ripple*1000:.1f} mV limit). High likelihood of dried/failed filter capacitors (bad ESR).")
-        else:
-            findings.append(f"[PASS] Power rail noise/ripple is clean ({vpp*1000:.1f} mVpp).")
-
-    elif b_type == "AC_SWITCHING":
-        if freq == 0 or vpp < 0.1:
-            findings.append(f"[CRITICAL] No clock/switching activity detected! Frequency is 0 Hz or flatline. Crystal stopped, MCU halted, or PWM driver inactive.")
-        else:
-            findings.append(f"[PASS] Active switching detected at {freq} Hz with {vpp:.2f} Vpp amplitude.")
-            findings.append(f"[INFO] Duty Cycle: +{m.get('duty_cycle_pos_pct', 0)}% / -{m.get('duty_cycle_neg_pct', 0)}%.")
-
-    return findings
+def parse_args():
+    parser = argparse.ArgumentParser(description="AI Circuit Doctor CLI")
+    parser.add_argument("-p", "--port", type=str, default=None, help="Serial port (default: auto-detect)")
+    parser.add_argument("-t", "--target", type=str, default="5V_RAIL", help="Target benchmark profile ID")
+    parser.add_argument("--auto", action="store_true", help="Trigger AUTO calibration before diagnostic")
+    return parser.parse_args()
 
 def main():
-    print("==================================================================")
-    print("      AI CIRCUIT DOCTOR - OSCILLOSCOPE HARDWARE DIAGNOSTICS       ")
-    print("==================================================================")
+    args = parse_args()
+    port = find_scope_port(args.port) or args.port or ("COM3" if sys.platform == "win32" else "/dev/ttyUSB0")
 
-    scope = SCO1Oscilloscope(port="COM3", baudrate=9600)
-    if not scope.connect():
+    print("=" * 68)
+    print("      🩺 AI CIRCUIT DOCTOR - OSCILLOSCOPE HARDWARE DIAGNOSTICS")
+    print("=" * 68)
+    print(f"[PORT] Connecting on: {port} at 9600 Baud...")
+
+    driver = SCODriver(port=port, baudrate=9600)
+    if not driver.open_port():
+        print(f"[ERROR] Failed to open port {port}. Check physical connections.")
         sys.exit(1)
 
     try:
-        print("Select the circuit point you are testing:")
-        for k, v in CIRCUIT_BENCHMARKS.items():
-            print(f"  [{k}] {v['name']}")
+        profiles = CIRCUIT_PROFILES
+        target_id = args.target if args.target in profiles else "5V_RAIL"
+        prof = profiles[target_id]
 
-        choice = "1"  # default
-        if len(sys.argv) > 1:
-            choice = sys.argv[1]
-        
-        benchmark = CIRCUIT_BENCHMARKS.get(choice, CIRCUIT_BENCHMARKS["1"])
-        print(f"\n[TARGET] Testing: {benchmark['name']}...")
-        
-        # Trigger Auto for best signal view
-        scope.trigger_auto()
-        time.sleep(0.5)
+        print(f"\n[TARGET] Testing: {prof['name_ar']} ({prof['name_en']})")
+        print(f"         {prof['desc_ar']}")
 
-        # Get measurements
-        report = scope.run_ai_diagnostic_snapshot()
-        m = report.get("measurements", {})
-        
+        if args.auto:
+            print("[ACTION] Triggering hardware AUTO SET (0x01)...")
+            driver.trigger_auto()
+            time.sleep(0.5)
+
+        # Query hardware
+        print("[ACTION] Querying 12 live electrical parameters (0x02)...")
+        with driver._serial_lock:
+            m = driver._query_device_serial()
+
+        if not m:
+            print("[ERROR] No response received from oscilloscope! Ensure scope is powered ON.")
+            sys.exit(1)
+
         print("\n------------------- MEASURED TELEMETRY -------------------")
-        print(f"  Max Voltage   : {m.get('v_max_v', 0):.3f} V")
-        print(f"  Min Voltage   : {m.get('v_min_v', 0):.3f} V")
-        print(f"  Vpp (Ripple)  : {m.get('v_pp_v', 0):.3f} V")
-        print(f"  Frequency     : {m.get('frequency_hz', 0)} Hz")
-        print(f"  Period        : {m.get('period', 0)}")
+        print(f"  * V_MAX (Maximum)     : {m['v_max']:.3f} V")
+        print(f"  * V_MIN (Minimum)     : {m['v_min']:.3f} V")
+        print(f"  * V_AVE (Average DC)  : {m['v_ave']:.3f} V  <-- Primary DC Level")
+        print(f"  * V_PP  (Ripple/Noise): {m['v_pp']:.3f} V   ({m['v_pp']*1000:.1f} mVpp)")
+        print(f"  * Frequency           : {m['frequency_hz']:.2f} Hz")
+        print(f"  * Period              : {m['period_us']:.2f} µs")
+        print(f"  * Duty Cycle (+ / -)  : +{m['duty_pos_pct']}% / -{m['duty_neg_pct']}%")
         print("----------------------------------------------------------")
 
-        # Run Doctor diagnosis
-        findings = diagnose(benchmark, m)
-        print("\n================== AI DIAGNOSTIC REPORT ==================")
-        for f in findings:
-            print(f"  {f}")
-        print("==========================================================")
+        # Run Doctor Diagnosis using unified engine
+        report = AICircuitDoctor.diagnose_point(target_id, m)
+
+        score = report['health_score']
+        severity = report['severity']
+        print(f"\n==================== AI DIAGNOSTIC REPORT ====================")
+        print(f"  * Health Score : {score}%  [{severity}]")
+        print(f"  * Assessment   : {report['status_title_ar']}")
+        print(f"--------------------------------------------------------------")
+        print("  Findings (الملاحظات الهندسية):")
+        for f in report['findings']:
+            print(f"    - [{f['level']}] {f['title_ar']}")
+            print(f"      {f['detail_ar']}")
+        
+        print("\n  Recommendations (خطوات الإصلاح المقترحة):")
+        for idx, r in enumerate(report['recommendations'], 1):
+            print(f"    {idx}. {r['step_ar']}")
+        print("==============================================================")
 
     finally:
-        scope.close()
+        driver.close_port()
 
 if __name__ == "__main__":
     main()

@@ -2,16 +2,17 @@
 SCO_1_500K Oscilloscope Hardware Driver & Telemetry Streamer
 Author: Antigravity Engineering
 ------------------------------------------------------------
-Provides robust, thread-safe asynchronous telemetry polling from the
-SCO_1_500K digital oscilloscope over UART at 9600 Baud.
 Features:
-- Background acquisition worker (5-10 Hz)
-- Accurate unit conversions (uV -> V, centi-Hz -> Hz, 10ns -> us)
+- Cross-platform port auto-discovery (Windows, Linux, macOS)
+- Dual-lock architecture: non-blocking state access (0ms latency for web/event loop)
+- Dedicated serial bus locking
+- Accurate mathematical scaling (uV -> V, centi-Hz -> Hz, 10ns -> us)
 - Remote AUTO calibration command (0x01 0x01)
-- Rolling buffer of history metrics for real-time trend plotting
-- Thread-safe state access
+- Rolling telemetry history buffer
 """
 
+import os
+import sys
 import time
 import struct
 import threading
@@ -22,17 +23,80 @@ import serial.tools.list_ports
 
 HEADER = bytes([0xAB, 0xCD, 0xEF])
 
+# Known USB-to-TTL UART bridges (VID, PID)
+KNOWN_UART_VID_PIDS = {
+    (0x1A86, 0x7523): "WCH CH340",
+    (0x1A86, 0x5523): "WCH CH341",
+    (0x1A86, 0x55D4): "WCH CH9102",
+    (0x1A86, 0x55D3): "WCH CH343",
+    (0x10C4, 0xEA60): "Silicon Labs CP2102/CP2104",
+    (0x0403, 0x6001): "FTDI FT232R",
+    (0x067B, 0x2303): "Prolific PL2303"
+}
+
+def find_scope_port(preferred: Optional[str] = None) -> Optional[str]:
+    """
+    Intelligently discovers the SCO_1_500K serial port across Windows, Linux, and macOS.
+    Order of precedence:
+    1. Explicit parameter `preferred` (e.g. from --port CLI)
+    2. SCO_PORT environment variable
+    3. Auto-detection matching known USB-to-TTL UART bridges (CH340, CP2102, FT232)
+    4. Auto-detection matching USB-Serial keywords in device description
+    5. First available serial port
+    """
+    if preferred and preferred.strip():
+        return preferred.strip()
+
+    env_port = os.environ.get("SCO_PORT", "").strip()
+    if env_port:
+        return env_port
+
+    available_ports = list(serial.tools.list_ports.comports())
+    if not available_ports:
+        return None
+
+    # Priority A: Check exact VID/PID match
+    for port_info in available_ports:
+        if port_info.vid is not None and port_info.pid is not None:
+            key = (port_info.vid, port_info.pid)
+            if key in KNOWN_UART_VID_PIDS:
+                return port_info.device
+
+    # Priority B: Check description keywords
+    keywords = ["CH340", "CH341", "CP210", "FT232", "USB-SERIAL", "PL2303", "UART", "USB to UART"]
+    for port_info in available_ports:
+        desc = (port_info.description or "").upper()
+        mfg = (port_info.manufacturer or "").upper()
+        for kw in keywords:
+            if kw.upper() in desc or kw.upper() in mfg:
+                return port_info.device
+
+    # Priority C: OS-specific preferred names
+    for port_info in available_ports:
+        dev = port_info.device
+        if dev.startswith("/dev/ttyUSB") or dev.startswith("/dev/ttyACM") or "usbserial" in dev.lower():
+            return dev
+
+    # Priority D: First available
+    return available_ports[0].device
+
+
 class SCODriver:
-    def __init__(self, port: str = "COM3", baudrate: int = 9600, history_len: int = 120):
-        self.port = port
+    def __init__(self, port: Optional[str] = None, baudrate: int = 9600, history_len: int = 120):
+        self.port = find_scope_port(port) or (port if port else ("COM3" if sys.platform == "win32" else "/dev/ttyUSB0"))
         self.baudrate = baudrate
         self.ser: Optional[serial.Serial] = None
-        self.lock = threading.Lock()
+        
+        # Dual-Lock Architecture:
+        # 1. _state_lock: Protects in-memory state variables only (instantaneous acquire < 1us)
+        # 2. _serial_lock: Protects serial bus hardware transactions (prevents bus contention)
+        self._state_lock = threading.Lock()
+        self._serial_lock = threading.Lock()
         
         self.running = False
         self.worker_thread: Optional[threading.Thread] = None
         
-        # State
+        # Internal State
         self.connected = False
         self.last_error = ""
         self.last_update_ts = 0.0
@@ -60,10 +124,16 @@ class SCODriver:
         }
 
     def open_port(self) -> bool:
-        with self.lock:
+        with self._serial_lock:
             if self.ser and self.ser.is_open:
                 return True
             try:
+                # If current port doesn't exist, re-scan
+                if not self.port or not os.path.exists(self.port) if not sys.platform == "win32" else False:
+                    detected = find_scope_port()
+                    if detected:
+                        self.port = detected
+
                 self.ser = serial.Serial(
                     port=self.port,
                     baudrate=self.baudrate,
@@ -74,49 +144,61 @@ class SCODriver:
                 )
                 self.ser.reset_input_buffer()
                 self.ser.reset_output_buffer()
-                self.connected = True
-                self.last_error = ""
+                
+                with self._state_lock:
+                    self.connected = True
+                    self.last_error = ""
                 return True
             except Exception as e:
-                self.connected = False
-                self.last_error = str(e)
+                with self._state_lock:
+                    self.connected = False
+                    self.last_error = str(e)
                 return False
 
     def close_port(self):
-        with self.lock:
+        with self._serial_lock:
             if self.ser and self.ser.is_open:
                 try:
                     self.ser.close()
                 except Exception:
                     pass
             self.ser = None
-            self.connected = False
+            with self._state_lock:
+                self.connected = False
 
     def trigger_auto(self) -> bool:
-        """Sends the remote AUTO calibration command (0x01 0x01) to the oscilloscope."""
-        with self.lock:
+        """
+        Sends the remote AUTO calibration command (0x01 0x01) to the oscilloscope.
+        Thread-safe across serial bus.
+        """
+        with self._serial_lock:
             if not self.ser or not self.ser.is_open:
                 return False
             try:
                 self.ser.reset_input_buffer()
                 self.ser.write(bytes([0x01, 0x01]))
-                time.sleep(0.4)
+                time.sleep(0.3)
                 return True
             except Exception as e:
-                self.last_error = str(e)
+                with self._state_lock:
+                    self.last_error = str(e)
                 return False
 
     def toggle_freeze(self) -> bool:
         """Freezes or unfreezes live telemetry updates."""
-        self.is_frozen = not self.is_frozen
-        if self.is_frozen:
-            self.last_frozen_metrics = dict(self.latest_metrics)
-        else:
-            self.last_frozen_metrics = None
-        return self.is_frozen
+        with self._state_lock:
+            self.is_frozen = not self.is_frozen
+            if self.is_frozen:
+                self.last_frozen_metrics = dict(self.latest_metrics)
+            else:
+                self.last_frozen_metrics = None
+            return self.is_frozen
 
-    def _query_device(self) -> Optional[Dict[str, Any]]:
-        """Sends 0x02 0x02 and parses the 55-byte response packet."""
+    def _query_device_serial(self) -> Optional[Dict[str, Any]]:
+        """
+        Performs serial I/O to read 55-byte packet.
+        MUST BE CALLED under _serial_lock ONLY, NOT holding _state_lock.
+        """
         if not self.ser or not self.ser.is_open:
             return None
 
@@ -124,10 +206,8 @@ class SCODriver:
             self.ser.reset_input_buffer()
             self.ser.write(bytes([0x02, 0x02]))
             
-            # Read 55 bytes
             data = self.ser.read(55)
             if len(data) != 55:
-                # retry reading remainder if chunked
                 if len(data) > 0 and len(data) < 55:
                     remainder = self.ser.read(55 - len(data))
                     data += remainder
@@ -150,14 +230,14 @@ class SCODriver:
             vp   = parse_v(raw[4], signs[3])
             vrms = round(raw[5] / 1_000_000.0, 4)
 
-            # Period in 10ns ticks -> microseconds
+            # Period: 10ns ticks -> microseconds
             period_us = round((raw[6] * 10.0) / 1000.0, 3)
-            # Frequency in 0.01 Hz -> Hz
+            # Frequency: centi-Hz (0.01 Hz) -> Hz
             freq_hz   = round(raw[7] / 100.0, 2)
-            # Duty cycles in 0.1 %
+            # Duty cycles: in 0.1 %
             duty_pos  = round(raw[8] * 0.1, 1)
             duty_neg  = round(raw[9] * 0.1, 1)
-            # Pulse widths in 10ns ticks -> microseconds
+            # Pulse widths: in 10ns ticks -> microseconds
             pw_pos_us = round((raw[10] * 10.0) / 1000.0, 3)
             pw_neg_us = round((raw[11] * 10.0) / 1000.0, 3)
 
@@ -179,11 +259,12 @@ class SCODriver:
                 "formatted_time": time.strftime("%H:%M:%S", time.localtime(now))
             }
         except Exception as e:
-            self.last_error = str(e)
+            with self._state_lock:
+                self.last_error = str(e)
             return None
 
     def _worker_loop(self):
-        """Background thread worker for streaming telemetry."""
+        """Background acquisition loop."""
         consecutive_failures = 0
         while self.running:
             if not self.connected:
@@ -191,31 +272,35 @@ class SCODriver:
                     time.sleep(1.0)
                     continue
 
-            with self.lock:
-                metrics = self._query_device()
+            # Query hardware under _serial_lock
+            with self._serial_lock:
+                metrics = self._query_device_serial()
 
             if metrics:
                 consecutive_failures = 0
-                self.connected = True
-                self.last_update_ts = time.time()
-                if not self.is_frozen:
-                    self.latest_metrics = metrics
-                    self.history.append({
-                        "t": metrics["formatted_time"],
-                        "ts": metrics["timestamp"],
-                        "v_max": metrics["v_max"],
-                        "v_ave": metrics["v_ave"],
-                        "v_pp": metrics["v_pp"],
-                        "freq": metrics["frequency_hz"]
-                    })
+                now = time.time()
+                # Fast state update under _state_lock (< 1 microsecond)
+                with self._state_lock:
+                    self.connected = True
+                    self.last_update_ts = now
+                    if not self.is_frozen:
+                        self.latest_metrics = metrics
+                        self.history.append({
+                            "t": metrics["formatted_time"],
+                            "ts": metrics["timestamp"],
+                            "v_max": metrics["v_max"],
+                            "v_ave": metrics["v_ave"],
+                            "v_pp": metrics["v_pp"],
+                            "freq": metrics["frequency_hz"]
+                        })
             else:
                 consecutive_failures += 1
                 if consecutive_failures > 5:
-                    self.connected = False
+                    with self._state_lock:
+                        self.connected = False
                     self.close_port()
                     time.sleep(0.5)
 
-            # Polling rate ~6-8 Hz
             time.sleep(0.12)
 
     def start(self):
@@ -233,7 +318,11 @@ class SCODriver:
         self.close_port()
 
     def get_current_metrics(self) -> Dict[str, Any]:
-        with self.lock:
+        """
+        Instantaneous, non-blocking fetch of latest metrics.
+        Guaranteed zero delay for web event loop.
+        """
+        with self._state_lock:
             if self.is_frozen and self.last_frozen_metrics:
                 m = dict(self.last_frozen_metrics)
             else:
@@ -244,5 +333,5 @@ class SCODriver:
             return m
 
     def get_history(self) -> List[Dict[str, Any]]:
-        with self.lock:
+        with self._state_lock:
             return list(self.history)
