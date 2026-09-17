@@ -19,3 +19,22 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+================================================================================
+THIRD-PARTY ASSETS AND FIRMWARE EXCLUSION NOTICE:
+================================================================================
+The above MIT license applies SOLELY to the original source code and scripts
+developed in this repository (including sco_driver.py, ai_engine.py, app.py,
+run_workstation.py, cli/*, static/*, and related documentation).
+
+The following files are proprietary third-party assets provided solely for
+compatibility, device flashing, and reference purposes, and are EXCLUDED from
+the MIT License:
+1. firmware_tool/WCHMcuIAP.exe  - Copyright (c) Nanjing Qinheng Microelectronics (WCH)
+2. firmware_tool/CH375DLL.dll   - Copyright (c) Nanjing Qinheng Microelectronics (WCH)
+3. firmware_tool/SCO_1_V2.7.bin - Copyright (c) Device Manufacturer
+4. SCO_01_500K_Manual_EN.pdf   - Copyright (c) Device Manufacturer
+
+These third-party binaries and manuals remain the exclusive intellectual property
+of their respective owners. Users must adhere to the original vendor terms and
+licensing when utilizing these tools.

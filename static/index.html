@@ -62,6 +62,12 @@
     ::-webkit-scrollbar-thumb:hover {
       background: #334155;
     }
+
+    /* Offline Resilient Fallbacks (Workshop without Internet) */
+    body { background-color: #0b0f17; color: #e2e8f0; margin: 0; font-family: 'Cairo', system-ui, -apple-system, sans-serif; }
+    .glass-card { background: #161b22; border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 12px; }
+    button { cursor: pointer; font-family: inherit; }
+    select, input { background: #0d1117; color: #f8fafc; border: 1px solid #30363d; }
   </style>
 </head>
 <body class="min-h-screen flex flex-col selection:bg-emerald-500 selection:text-black">
@@ -373,7 +379,7 @@
 
     // INITIALIZATION
     window.addEventListener('DOMContentLoaded', () => {
-      onProfileChange();
+      fetchProfilesFromBackend();
       connectWebSocket();
       requestAnimationFrame(renderScopeLoop);
       setInterval(updateFpsCounter, 1000);
@@ -392,9 +398,9 @@
       ws = new WebSocket(wsUrl);
 
       ws.onopen = () => {
-        connDot.className = 'w-2.5 h-2.5 rounded-full bg-emerald-400 pulse-green';
-        connText.innerText = 'متصل (Live 9600)';
-        connText.className = 'font-mono text-xs text-emerald-400 font-bold';
+        connDot.className = 'w-2.5 h-2.5 rounded-full bg-amber-400 animate-pulse';
+        connText.innerText = 'الخادم متصل - فحص العتاد...';
+        connText.className = 'font-mono text-xs text-amber-300 font-bold';
       };
 
       ws.onmessage = (event) => {
@@ -414,7 +420,7 @@
 
       ws.onclose = () => {
         connDot.className = 'w-2.5 h-2.5 rounded-full bg-rose-500 pulse-red';
-        connText.innerText = 'انقطع الاتصال - جاري الإعادة';
+        connText.innerText = 'انقطع اتصال الخادم';
         connText.className = 'font-mono text-xs text-rose-400';
         setTimeout(connectWebSocket, 1500);
       };
@@ -437,8 +443,31 @@
     function updateDashboard(d) {
       if (!d) return;
 
+      const connDot = document.getElementById('connDot');
+      const connText = document.getElementById('connText');
+      const sigState = document.getElementById('signalStateText');
+
       if (d.port) {
         document.getElementById('portDisplay').innerText = d.port;
+      }
+
+      // Reviewer Point 2 Fix: Distinguish hardware connection state from server websocket state
+      if (d.connected === false) {
+        connDot.className = 'w-2.5 h-2.5 rounded-full bg-rose-500 pulse-red';
+        connText.innerText = 'العتاد مفصول (' + (d.port || 'COM') + ')';
+        connText.className = 'font-mono text-xs text-rose-400 font-bold';
+        if (sigState) {
+          sigState.innerText = 'العتاد غير متصل أو مطفأ';
+          sigState.className = 'text-rose-400 font-medium';
+        }
+      } else {
+        connDot.className = 'w-2.5 h-2.5 rounded-full bg-emerald-400 pulse-green';
+        connText.innerText = 'متصل: ' + (d.port || 'COM') + ' (9600)';
+        connText.className = 'font-mono text-xs text-emerald-400 font-bold';
+        if (sigState) {
+          sigState.innerText = (d.v_pp > 0.04) ? 'إشارة نشطة / تموج' : 'جهد مستقر';
+          sigState.className = 'text-emerald-300 font-medium';
+        }
       }
 
       // Voltages
@@ -660,21 +689,35 @@
       trendCtx.stroke();
     }
 
-    // PROFILE CHANGE HANDLER
-    const PROFILE_DESCS = {
-      "5V_RAIL": "خط التغذية القياسي 5 فولت لدوائر المنطق والمتحكمات وحساسات الأردينو.",
-      "3V3_RAIL": "خط تغذية المعالجات الحديثة (STM32, ESP32, CH32) ومنظمات الجهد LDO.",
-      "1V8_RAIL": "جهد التغذية الحساس لأنوية المعالجات وذواكر DDR والشرائح المتقدمة.",
-      "12V_RAIL": "خط 12 فولت لتغذية الريليهات والمراوح ومراحل القدرة والسيارات.",
-      "USB_5V": "خط الطاقة القادم من شواحن ومنافذ الـ USB (4.75V - 5.25V).",
-      "CLOCK_XTAL": "مذبذبات التردد وكريستالات التوقيت للميكروكنترولر والدوائر الرقمية.",
-      "PWM_SIGNAL": "إشارات التحكم في سرعة المحركات، إضاءة الـ LED، والإنفرتر.",
-      "CUSTOM": "إدخال يدوي للجهد المتوقع ونسبة التسامح والتموج المطلوب فحصها."
-    };
+    // DYNAMIC BACKEND PROFILE FETCHING (Reviewer Point Fix)
+    let loadedProfiles = [];
+
+    async function fetchProfilesFromBackend() {
+      try {
+        const res = await fetch('/api/profiles');
+        loadedProfiles = await res.json();
+        const sel = document.getElementById('targetProfileSelect');
+        const prev = sel.value;
+        sel.innerHTML = '';
+        loadedProfiles.forEach(p => {
+          const opt = document.createElement('option');
+          opt.value = p.id;
+          opt.innerText = p.name_ar;
+          if (p.id === prev) opt.selected = true;
+          sel.appendChild(opt);
+        });
+        onProfileChange();
+      } catch (err) {
+        console.warn('Could not fetch profiles dynamically', err);
+      }
+    }
 
     function onProfileChange() {
       const sel = document.getElementById('targetProfileSelect').value;
-      document.getElementById('profileDesc').innerText = PROFILE_DESCS[sel] || "";
+      const found = loadedProfiles.find(p => p.id === sel);
+      if (found && found.desc_ar) {
+        document.getElementById('profileDesc').innerText = found.desc_ar;
+      }
       const customDiv = document.getElementById('customParamsDiv');
       if (sel === 'CUSTOM') {
         customDiv.classList.remove('hidden');
@@ -727,26 +770,34 @@
       if (!diag) return;
 
       const score = diag.health_score;
-      document.getElementById('healthScoreNum').innerText = `${score}%`;
-
-      // Update circle stroke-dasharray
       const circle = document.getElementById('healthCircle');
-      circle.setAttribute('stroke-dasharray', `${score}, 100`);
-
       const badge = document.getElementById('severityBadge');
-      if (diag.severity === 'CRITICAL' || score < 50) {
-        circle.setAttribute('class', 'text-rose-500 transition-all duration-700 ease-out');
-        badge.className = 'w-fit text-[11px] font-bold px-2.5 py-0.5 rounded-full bg-rose-500/20 text-rose-400 border border-rose-500/30';
-        badge.innerText = 'عطل حرج (CRITICAL)';
-      } else if (diag.severity === 'WARNING' || score < 85) {
-        circle.setAttribute('class', 'text-amber-500 transition-all duration-700 ease-out');
-        badge.className = 'w-fit text-[11px] font-bold px-2.5 py-0.5 rounded-full bg-amber-500/20 text-amber-400 border border-amber-500/30';
-        badge.innerText = 'تحذير / خلل (WARNING)';
+
+      if (diag.severity === 'OFFLINE') {
+        document.getElementById('healthScoreNum').innerText = '--';
+        circle.setAttribute('class', 'text-slate-700 transition-all duration-700 ease-out');
+        circle.setAttribute('stroke-dasharray', '0, 100');
+        badge.className = 'w-fit text-[11px] font-bold px-2.5 py-0.5 rounded-full bg-slate-800 text-slate-400 border border-slate-700';
+        badge.innerText = 'العتاد مفصول (OFFLINE)';
       } else {
-        circle.setAttribute('class', 'text-emerald-500 transition-all duration-700 ease-out');
-        badge.className = 'w-fit text-[11px] font-bold px-2.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/30';
-        badge.innerText = 'حالة ممتازة (PASS)';
+        document.getElementById('healthScoreNum').innerText = `${score}%`;
+        circle.setAttribute('stroke-dasharray', `${score}, 100`);
+
+        if (diag.severity === 'CRITICAL' || score < 50) {
+          circle.setAttribute('class', 'text-rose-500 transition-all duration-700 ease-out');
+          badge.className = 'w-fit text-[11px] font-bold px-2.5 py-0.5 rounded-full bg-rose-500/20 text-rose-400 border border-rose-500/30';
+          badge.innerText = 'عطل حرج (CRITICAL)';
+        } else if (diag.severity === 'WARNING' || score < 85) {
+          circle.setAttribute('class', 'text-amber-500 transition-all duration-700 ease-out');
+          badge.className = 'w-fit text-[11px] font-bold px-2.5 py-0.5 rounded-full bg-amber-500/20 text-amber-400 border border-amber-500/30';
+          badge.innerText = 'تحذير / خلل (WARNING)';
+        } else {
+          circle.setAttribute('class', 'text-emerald-500 transition-all duration-700 ease-out');
+          badge.className = 'w-fit text-[11px] font-bold px-2.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/30';
+          badge.innerText = 'حالة ممتازة (PASS)';
+        }
       }
+
 
       document.getElementById('diagnosisTitle').innerText = diag.status_title_ar;
 

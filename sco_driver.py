@@ -194,9 +194,46 @@ class SCODriver:
                 self.last_frozen_metrics = None
             return self.is_frozen
 
+    def _read_synchronized_packet(self, timeout: float = 0.5) -> Optional[bytes]:
+        """
+        Reads from serial until HEADER (0xAB, 0xCD, 0xEF) is matched,
+        then reads the exact remaining 52 bytes of the packet.
+        Handles frame misalignment and drops leading noise automatically.
+        """
+        if not self.ser or not self.ser.is_open:
+            return None
+
+        deadline = time.time() + timeout
+        header_buf = bytearray()
+
+        # Step 1: Scan for 3-byte header
+        while time.time() < deadline:
+            b = self.ser.read(1)
+            if not b:
+                continue
+            header_buf.append(b[0])
+            if len(header_buf) > 3:
+                header_buf.pop(0)
+            if bytes(header_buf) == HEADER:
+                break
+        else:
+            return None
+
+        # Step 2: Read remaining 52 bytes of payload and signs
+        remaining = bytearray()
+        while len(remaining) < 52 and time.time() < deadline:
+            chunk = self.ser.read(52 - len(remaining))
+            if chunk:
+                remaining.extend(chunk)
+
+        if len(remaining) != 52:
+            return None
+
+        return HEADER + bytes(remaining)
+
     def _query_device_serial(self) -> Optional[Dict[str, Any]]:
         """
-        Performs serial I/O to read 55-byte packet.
+        Performs serial I/O to read 55-byte packet with frame resync.
         MUST BE CALLED under _serial_lock ONLY, NOT holding _state_lock.
         """
         if not self.ser or not self.ser.is_open:
@@ -206,18 +243,22 @@ class SCODriver:
             self.ser.reset_input_buffer()
             self.ser.write(bytes([0x02, 0x02]))
             
-            data = self.ser.read(55)
-            if len(data) != 55:
-                if len(data) > 0 and len(data) < 55:
-                    remainder = self.ser.read(55 - len(data))
-                    data += remainder
-
-            if len(data) != 55 or data[:3] != HEADER:
+            data = self._read_synchronized_packet(timeout=0.6)
+            if not data or len(data) != 55 or data[:3] != HEADER:
                 return None
 
-            payload = data[3:51]
             signs = data[51:55]
+            # Heuristic Sanity Check 1: Sign bytes must strictly be 0 (positive) or 1 (negative)
+            for s in signs:
+                if s not in (0, 1):
+                    return None
+
+            payload = data[3:51]
             raw = struct.unpack('<12I', payload)
+
+            # Heuristic Sanity Check 2: Duty cycle <= 100.0% (raw <= 1000)
+            if raw[8] > 1000 or raw[9] > 1000:
+                return None
 
             def parse_v(val: int, sign: int) -> float:
                 v = -val if sign == 1 else val

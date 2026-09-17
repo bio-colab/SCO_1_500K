@@ -96,8 +96,39 @@ class AICircuitDoctor:
 
     @staticmethod
     def diagnose_point(profile_id: str, m: Dict[str, Any], custom_params: Dict[str, Any] = None) -> Dict[str, Any]:
-        """Runs thorough engineering rule-based and heuristics diagnostics on the measurements."""
-        profile = dict(CIRCUIT_PROFILES.get(profile_id, CIRCUIT_PROFILES["5V_RAIL"]))
+        # Check if hardware is offline (Reviewer Point 2 Fix)
+        if m.get("connected") is False:
+            prof_name = CIRCUIT_PROFILES.get(profile_id, CIRCUIT_PROFILES["5V_RAIL"])["name_ar"]
+            return {
+                "profile_id": profile_id,
+                "profile_name_ar": prof_name,
+                "profile_name_en": "Hardware Offline",
+                "health_score": 0,
+                "severity": "OFFLINE",
+                "status_title_ar": "الجهاز غير متصل بالحاسوب (Hardware Offline)",
+                "status_title_en": "Oscilloscope Hardware is Disconnected or Offline",
+                "findings": [{
+                    "level": "INFO",
+                    "title_ar": "العتاد غير متصل أو مطفأ",
+                    "detail_ar": "الخادم يعمل ولكن لا يستقبل بيانات من جهاز الأوسيلوسكوب. تأكد من تشغيل الجهاز بالزر وتوصيل أسلاك السيريال (TX/RX/GND).",
+                    "detail_en": "Serial port is offline. Ensure oscilloscope is powered ON and UART wiring is secure."
+                }],
+                "recommendations": [{
+                    "step_ar": "تأكد من أن مفتاح الطاقة الصغير (Power Switch) أعلى منفذ Type-C في وضع التشغيل (ON).",
+                    "step_en": "Ensure device power switch is ON and battery/Type-C is connected."
+                }, {
+                    "step_ar": "تحقق من سلامة توصيل الأسلاك: طرف TX في اللوحة -> طرف RX في المحول، وطرف RX -> طرف TX، والأرضي GND بـ BNC.",
+                    "step_en": "Check wiring: Scope TX -> Adapter RX, Scope RX -> Adapter TX, GND to BNC shield."
+                }],
+                "telemetry_snapshot": m
+            }
+
+        unknown_profile_warning = False
+        if profile_id not in CIRCUIT_PROFILES and profile_id != "CUSTOM":
+            unknown_profile_warning = True
+            profile = dict(CIRCUIT_PROFILES["5V_RAIL"])
+        else:
+            profile = dict(CIRCUIT_PROFILES.get(profile_id, CIRCUIT_PROFILES["5V_RAIL"]))
         
         # Safe handling of custom parameters (Issue 6 fix)
         if profile_id == "CUSTOM" and custom_params:
@@ -254,7 +285,7 @@ class AICircuitDoctor:
 
             # F. Transient Overshoot Check (vmax vs DC nominal)
             # If vave is nominal, but vmax spikes: note as transient overshoot rather than fatal DC fault
-            if min_allowed <= vave <= max_allowed and vmax > max_allowed * 1.2:
+            if min_allowed <= vave <= max_allowed and vmax > max_allowed * 1.12:
                 health_score = max(60, health_score - 15)
                 findings.append({
                     "level": "INFO",
@@ -285,7 +316,7 @@ class AICircuitDoctor:
         # ==========================================
         elif p_type in ["AC_CLOCK", "PWM"]:
             min_amp = profile.get("min_amplitude_v", 0.5)
-            if freq == 0 or vpp < 0.15:
+            if freq == 0 or vpp < 0.10:
                 health_score = 0
                 findings.append({
                     "level": "CRITICAL",
@@ -300,6 +331,23 @@ class AICircuitDoctor:
                 recommendations.append({
                     "step_ar": "افحص مكثفات تحميل الكريستالة (Load Capacitors 15-22pF) وافحص خط الـ RESET للتأكد من عدم تعليق المعالج.",
                     "step_en": "Inspect crystal load capacitors (15-22pF) and verify MCU RESET line is high."
+                })
+            elif vpp < min_amp:
+                # Weak Amplitude Check (Reviewer Point 3 Fix)
+                health_score = max(35, health_score - 50)
+                findings.append({
+                    "level": "WARNING",
+                    "title_ar": f"اتساع الإشارة ضعيف وغير كافٍ ({vpp:.2f}V < {min_amp:.2f}V)",
+                    "detail_ar": f"التذبذب موجود عند {freq:.1f} Hz ولكن اتساع القمة للقمة {vpp:.2f} Vpp أقل من الحد الأدنى المطلوب للمستويات المنطقية ({min_amp:.2f} Vpp).",
+                    "detail_en": f"Oscillation active at {freq:.1f} Hz but amplitude {vpp:.2f} Vpp is below logic minimum ({min_amp:.2f} Vpp)."
+                })
+                recommendations.append({
+                    "step_ar": "افحص مكثفات تحميل الكريستالة (15-22pF) ونظف أي أكسدة أو بقايا فلكس بين أرجل الكريستالة.",
+                    "step_en": "Check crystal load capacitors (15-22pF) and clean flux residue between crystal pins."
+                })
+                recommendations.append({
+                    "step_ar": "تحقق من سلامة مستوى جهد تغذية المذبذب (VDD) ومقاومة التغذية الراجعة الداخلية.",
+                    "step_en": "Verify oscillator VDD supply level and feedback bias resistor."
                 })
             else:
                 findings.append({
@@ -319,6 +367,14 @@ class AICircuitDoctor:
                     "step_ar": "المذبذب / مشغل النبضات يعمل بكفاءة.",
                     "step_en": "Clock generator / PWM driver is operating properly."
                 })
+
+        if unknown_profile_warning:
+            findings.insert(0, {
+                "level": "INFO",
+                "title_ar": f"ملف اختبار غير معروف: '{profile_id}'",
+                "detail_ar": f"تم استخدام ملف خط التغذية 5.0V VCC القياسي تلقائياً لعدم تطابق اسم الملف.",
+                "detail_en": f"Unknown profile ID '{profile_id}', defaulted to 5.0V VCC benchmark."
+            })
 
         # ==========================================
         # 3. DERIVE SEVERITY & OVERALL TITLE (Issue 2 Fix)
